@@ -5,7 +5,7 @@ from graph import Graph
 from algorithms.hamiltonian import run_all
 from model import Direction, Obstacle, Robot
 
-TEST_MAPS_DIR = Path(__file__).parent.parent / "test_maps"
+TEST_MAPS_DIR = Path("test_maps")
 
 
 def load_map(path: Path) -> tuple[Robot, list[Obstacle]]:
@@ -33,6 +33,8 @@ def load_map(path: Path) -> tuple[Robot, list[Obstacle]]:
 
 def main():
     map_paths = sorted(TEST_MAPS_DIR.glob("*.json"))
+    if not map_paths:
+        raise SystemExit(f"No JSON maps found in {TEST_MAPS_DIR.resolve()}")
 
     for map_path in map_paths:
         robot, obstacles = load_map(map_path)
