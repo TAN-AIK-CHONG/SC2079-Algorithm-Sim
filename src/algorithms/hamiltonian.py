@@ -1,5 +1,6 @@
 import itertools
 
+import time
 from graph import Graph
 
 
@@ -53,3 +54,26 @@ def exhaustive_search(graph: Graph) -> list[str]:
             best, best_length = candidate, candidate_length
 
     return best
+
+def run_all(graph: Graph) -> dict:
+    results = {}
+
+    for name, fn in [
+        ("nearest_neighbour", nearest_neighbour),
+        ("pairwise_swap", pairwise_swap),
+        ("exhaustive_search", exhaustive_search),
+    ]:
+        start = time.perf_counter()
+        path = fn(graph)
+        elapsed = time.perf_counter() - start
+        results[name] = {
+            "path": path,
+            "length": path_length(graph, path),
+            "time": elapsed,
+        }
+
+    optimal = results["exhaustive_search"]["length"]
+    for name in results:
+        results[name]["accuracy"] = optimal / results[name]["length"]
+
+    return results
