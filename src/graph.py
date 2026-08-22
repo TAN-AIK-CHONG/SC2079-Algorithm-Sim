@@ -1,9 +1,3 @@
-"""
-Weighted graph over robot configurations: the start pose and each obstacle's
-viewing pose. Edge weights are Dubins path lengths, used as input to the
-Hamiltonian path search.
-"""
-
 import math
 from dataclasses import dataclass
 
@@ -31,7 +25,7 @@ class Graph:
     weights: dict[tuple[str, str], float]  # (node_id, node_id) -> dubins length
 
     @classmethod
-    def build(cls, robot: Robot, obstacles: list[Obstacle], radius: float) -> "Graph":
+    def build(cls, robot: Robot, obstacles: list[Obstacle]) -> "Graph":
         nodes = [Node("S", grid_to_pose(*robot.position()))]
 
         for obs in obstacles:
@@ -41,7 +35,7 @@ class Graph:
         weights = {}
         for i, node_a in enumerate(nodes):
             for node_b in nodes[i + 1 :]:
-                d = dubins_length(node_a.pose, node_b.pose, radius)
+                d = dubins_length(node_a.pose, node_b.pose)
                 weights[(node_a.id, node_b.id)] = d
                 weights[(node_b.id, node_a.id)] = d
 
