@@ -1,16 +1,17 @@
 from dataclasses import dataclass
 from enum import Enum
 
-NUM_GRIDS = 20
-GRID_LENGTH_CM = 10
-
+ARENA_LENGTH_CM = 200
 ROBOT_FOOTPRINT_LENGTH_CM = 30
 OBSTACLE_FOOTPRINT_LENGTH_CM = 10
+CAMERA_CLEARANCE_LENGTH_CM = 20
+
+NUM_GRIDS = 20
+GRID_LENGTH_CM = ARENA_LENGTH_CM // NUM_GRIDS
 
 ROBOT_FOOTPRINT_CELLS = ROBOT_FOOTPRINT_LENGTH_CM // GRID_LENGTH_CM
 OBSTACLE_FOOTPRINT_CELLS = OBSTACLE_FOOTPRINT_LENGTH_CM // GRID_LENGTH_CM
 
-CAMERA_CLEARANCE_LENGTH_CM = 20
 CAMERA_CLEARANCE_CELLS = CAMERA_CLEARANCE_LENGTH_CM // GRID_LENGTH_CM
 
 DEPTH_CLEARANCE_CELLS = ROBOT_FOOTPRINT_CELLS + CAMERA_CLEARANCE_CELLS
@@ -56,6 +57,14 @@ class Obstacle:
                 self.y_coord - ALIGNMENT_OFFSET_CELLS,
                 Direction.WEST,
             )
+            
+    def inflated_bounds(self) -> tuple[float, float, float, float]:
+        margin_cells = ROBOT_FOOTPRINT_CELLS / 2
+        x_min = (self.x_coord - margin_cells) * GRID_LENGTH_CM
+        y_min = (self.y_coord - margin_cells) * GRID_LENGTH_CM
+        x_max = (self.x_coord + OBSTACLE_FOOTPRINT_CELLS + margin_cells) * GRID_LENGTH_CM
+        y_max = (self.y_coord + OBSTACLE_FOOTPRINT_CELLS + margin_cells) * GRID_LENGTH_CM
+        return (x_min, y_min, x_max, y_max)
 
 
 @dataclass(frozen=True)
