@@ -32,19 +32,19 @@
         {
             "id": "5",
             "x_coord": 13,
-            "y_coord": 3,
+            "y_coord": 5,
             "image_side": "SOUTH"
         },
         {
             "id": "6",
-            "x_coord": 17,
+            "x_coord": 13,
             "y_coord": 12,
             "image_side": "EAST"
         },
         {
             "id": "7",
             "x_coord": 14,
-            "y_coord": 17,
+            "y_coord": 13,
             "image_side": "NORTH"
         }
     ]

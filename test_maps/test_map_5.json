@@ -13,7 +13,7 @@
         },
         {
             "id": "2",
-            "x_coord": 4,
+            "x_coord": 5,
             "y_coord": 3,
             "image_side": "WEST"
         },
@@ -32,14 +32,14 @@
         {
             "id": "5",
             "x_coord": 12,
-            "y_coord": 3,
+            "y_coord": 7,
             "image_side": "SOUTH"
         },
         {
             "id": "6",
-            "x_coord": 12,
-            "y_coord": 15,
-            "image_side": "EAST"
+            "x_coord": 10,
+            "y_coord": 13,
+            "image_side": "WEST"
         },
         {
             "id": "7",
@@ -50,7 +50,7 @@
         {
             "id": "8",
             "x_coord": 17,
-            "y_coord": 17,
+            "y_coord": 19,
             "image_side": "WEST"
         }
     ]
