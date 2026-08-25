@@ -95,3 +95,25 @@ class Arena:
             self.in_bounds(x_coord, y_coord)
             and (x_coord, y_coord) not in self.blocked_cells()
         )
+
+
+def parse_scenario(data: dict) -> tuple[Robot, list[Obstacle]]:
+    """Build a Robot + Obstacle list from the same JSON shape as test_maps/*.json
+    (used by both sim_hamiltonian.py and the live API, so the two never drift)."""
+    robot = Robot(
+        data["robot"]["x_coord"],
+        data["robot"]["y_coord"],
+        Direction[data["robot"]["facing"]],
+    )
+
+    obstacles = [
+        Obstacle(
+            obs["id"],
+            obs["x_coord"],
+            obs["y_coord"],
+            Direction[obs["image_side"]],
+        )
+        for obs in data["obstacles"]
+    ]
+
+    return robot, obstacles
