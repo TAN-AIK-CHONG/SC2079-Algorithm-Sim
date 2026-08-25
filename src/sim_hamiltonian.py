@@ -3,7 +3,7 @@ from pathlib import Path
 
 from graph import Graph
 from algorithms.hamiltonian import run_all
-from model import Direction, Obstacle, Robot
+from model import Obstacle, Robot, parse_scenario
 
 TEST_MAPS_DIR = Path("test_maps")
 
@@ -11,24 +11,7 @@ TEST_MAPS_DIR = Path("test_maps")
 def load_map(path: Path) -> tuple[Robot, list[Obstacle]]:
     with open(path) as f:
         data = json.load(f)
-
-    robot = Robot(
-        data["robot"]["x_coord"],
-        data["robot"]["y_coord"],
-        Direction[data["robot"]["facing"]],
-    )
-
-    obstacles = [
-        Obstacle(
-            obs["id"],
-            obs["x_coord"],
-            obs["y_coord"],
-            Direction[obs["image_side"]],
-        )
-        for obs in data["obstacles"]
-    ]
-
-    return robot, obstacles
+    return parse_scenario(data)
 
 
 def main():
