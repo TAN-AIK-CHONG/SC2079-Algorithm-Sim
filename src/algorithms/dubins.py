@@ -2,28 +2,32 @@ import math
 
 import rsplan
 
-from model import Pose
+from model import Robot
 
 TURNING_RADIUS_CM = 25
 
 
 def dubins_path(
-    start_pose: Pose,
-    end_pose: Pose,
+    start: Robot,
+    end: Robot,
     radius: float = TURNING_RADIUS_CM,
 ):
 
-    start = (start_pose.x_cm, start_pose.y_cm, start_pose.theta_rad)
-    end = (end_pose.x_cm, end_pose.y_cm, end_pose.theta_rad)
-    return rsplan.path(start, end, radius, 0, 0.5)
+    return rsplan.path(
+        (start.x_cm, start.y_cm, start.theta_rad),
+        (end.x_cm, end.y_cm, end.theta_rad),
+        radius,
+        0,
+        0.5,
+    )
 
 
 def dubins_length(
-    start_pose: Pose,
-    end_pose: Pose,
+    start: Robot,
+    end: Robot,
     radius: float = TURNING_RADIUS_CM,
 ) -> float:
-    return dubins_path(start_pose, end_pose, radius).total_length
+    return dubins_path(start, end, radius).total_length
 
 
 def path_commands(path) -> list[dict]:
