@@ -3,14 +3,18 @@ import math
 from dataclasses import dataclass
 
 from algorithms.dubins import TURNING_RADIUS_CM, dubins_length
-from model import ARENA_LENGTH_CM, Pose
+from collision import footprint_in_collision
+from model import Corners, Robot
 
 STEP_CM = 5.0
-NUM_HEADING_BUCKETS = 72 # 22.5 degrees
+SEGMENT_SAMPLES = 2
+NUM_HEADING_BUCKETS = 72
 POS_RESOLUTION_CM = 5.0
 GOAL_POS_TOLERANCE_CM = 5.0
 GOAL_ANGLE_TOLERANCE_RAD = math.radians(5)
-REVERSE_COST_MULTIPLIER = 1.0 # Initial assumption that forward and backward driving will have the same cost
+REVERSE_COST_MULTIPLIER = (
+    1.0  # Initial assumption that forward and backward driving will have the same cost
+)
 
 
 def _normalize_angle(theta: float) -> float:
@@ -36,34 +40,43 @@ def _motion_primitives(step: float):
 
 @dataclass
 class HybridAstarResult:
-    poses: list[Pose]  # start -> ... -> goal
+    path: list[Robot]  # start -> ... -> goal
     length: float
 
 
-def _in_collision(x: float, y: float, obstacle_boxes) -> bool:
-    if not (0 <= x <= ARENA_LENGTH_CM and 0 <= y <= ARENA_LENGTH_CM):
-        return True
-    for (x0, y0, x1, y1) in obstacle_boxes:
-        if x0 <= x <= x1 and y0 <= y <= y1:
-            return True
-    return False
+def _segment_collision_free(
+    start: Robot,
+    end: Robot,
+    obstacles: list[Corners],
+    samples: int = SEGMENT_SAMPLES,
+) -> bool:
+    dx = end.x_cm - start.x_cm
+    dy = end.y_cm - start.y_cm
+    dtheta = end.theta_rad - start.theta_rad
 
-
-def _segment_collision_free(x0, y0, x1, y1, obstacle_boxes, samples=2) -> bool:
     for i in range(samples + 1):
         t = i / samples
-        if _in_collision(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, obstacle_boxes):
+        sample = Robot(
+            start.x_cm + dx * t,
+            start.y_cm + dy * t,
+            start.theta_rad + dtheta * t,
+        )
+        if footprint_in_collision(sample, obstacles):
             return False
     return True
 
 
 def hybrid_astar(
-    start: Pose,
-    goal: Pose,
-    obstacle_boxes: list[tuple[float, float, float, float]],
+    start: Robot,
+    goal: Robot,
+    obstacles: list[Corners],
 ) -> HybridAstarResult | None:
-    if _in_collision(start.x_cm, start.y_cm, obstacle_boxes) or _in_collision(goal.x_cm, goal.y_cm, obstacle_boxes):
-        print("Start or goal viewing pose is in collision with an obstacle or out of bounds.")
+    if footprint_in_collision(start, obstacles) or footprint_in_collision(
+        goal, obstacles
+    ):
+        print(
+            "Start or goal viewing pose is in collision with an obstacle or out of bounds."
+        )
         return None
 
     actions = _motion_primitives(STEP_CM)
@@ -77,7 +90,7 @@ def hybrid_astar(
         )
 
     def heuristic(x, y, theta):
-        return dubins_length(Pose(x, y, theta), goal)
+        return dubins_length(Robot(x, y, theta), goal)
 
     start_state = (start.x_cm, start.y_cm, start.theta_rad)
     start_key = state_key(*start_state)
@@ -103,12 +116,15 @@ def hybrid_astar(
         if reached_goal:
             return _reconstruct(came_from, start_state, key, g)
 
+        current = Robot(x, y, theta)
         for name, direction, dtheta, distance in actions:
             new_theta = theta + dtheta
             new_x = x + direction * distance * math.cos(theta)
             new_y = y + direction * distance * math.sin(theta)
 
-            if not _segment_collision_free(x, y, new_x, new_y, obstacle_boxes):
+            if not _segment_collision_free(
+                current, Robot(new_x, new_y, new_theta), obstacles
+            ):
                 continue
 
             step_cost = distance * (REVERSE_COST_MULTIPLIER if direction == -1 else 1.0)
@@ -129,12 +145,12 @@ def hybrid_astar(
 
 
 def _reconstruct(came_from, start_state, goal_key, total_length) -> HybridAstarResult:
-    poses = []
+    path = []
     key = goal_key
     while came_from.get(key) is not None:
         prev_key, state = came_from[key]
-        poses.append(Pose(*state))
+        path.append(Robot(*state))
         key = prev_key
-    poses.append(Pose(*start_state))
-    poses.reverse()
-    return HybridAstarResult(poses=poses, length=total_length)
+    path.append(Robot(*start_state))
+    path.reverse()
+    return HybridAstarResult(path=path, length=total_length)
