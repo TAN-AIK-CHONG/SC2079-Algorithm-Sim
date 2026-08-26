@@ -21,8 +21,13 @@ import time
 from flask import Flask, jsonify, request
 
 from algorithms.dubins import TURNING_RADIUS_CM, dubins_path, path_commands
-from algorithms.hamiltonian import exhaustive_search, nearest_neighbour, pairwise_swap, path_length
-from graph import Graph
+from algorithms.hamiltonian import (
+    exhaustive_search,
+    nearest_neighbour,
+    pairwise_swap,
+    path_length,
+)
+from algorithms.graph import Graph
 from model import parse_scenario
 
 app = Flask(__name__)
@@ -32,7 +37,7 @@ ALGORITHMS = {
     "pairwise_swap": pairwise_swap,
     "exhaustive_search": exhaustive_search,
 }
-DEFAULT_ALGORITHM = "exhaustive_search"  # obstacle count is small enough that this is cheap and optimal
+DEFAULT_ALGORITHM = "exhaustive_search"
 
 
 @app.get("/health")
@@ -57,25 +62,35 @@ def plan():
     algorithm_name = data.get("algorithm", DEFAULT_ALGORITHM)
     algorithm = ALGORITHMS.get(algorithm_name)
     if algorithm is None:
-        return jsonify(error=f"unknown algorithm '{algorithm_name}', expected one of {list(ALGORITHMS)}"), 400
+        return (
+            jsonify(
+                error=f"unknown algorithm '{algorithm_name}', expected one of {list(ALGORITHMS)}"
+            ),
+            400,
+        )
 
     radius = data.get("radius", TURNING_RADIUS_CM)
 
-    graph = Graph.build(robot, obstacles, radius=radius)
+    graph = Graph.build(robot, obstacles)
 
     t0 = time.perf_counter()
     order = algorithm(graph)
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
-    poses = {node.id: node.pose for node in graph.nodes}
+    robots = {node.id: node.robot for node in graph.nodes}
     waypoints = [
-        {"id": node_id, "x_cm": poses[node_id].x_cm, "y_cm": poses[node_id].y_cm, "theta_rad": poses[node_id].theta_rad}
+        {
+            "id": node_id,
+            "x_cm": robots[node_id].x_cm,
+            "y_cm": robots[node_id].y_cm,
+            "theta_rad": robots[node_id].theta_rad,
+        }
         for node_id in order
     ]
 
     legs = []
     for from_id, to_id in zip(order, order[1:]):
-        path = dubins_path(poses[from_id], poses[to_id], radius)
+        path = dubins_path(robots[from_id], robots[to_id], radius)
         legs.append({"to": to_id, "commands": path_commands(path)})
 
     return jsonify(
