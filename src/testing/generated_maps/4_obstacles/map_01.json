@@ -1,0 +1,33 @@
+{
+    "robot": {
+        "x_coord": 0,
+        "y_coord": 0,
+        "facing": "NORTH"
+    },
+    "obstacles": [
+        {
+            "id": 0,
+            "x_coord": 8,
+            "y_coord": 11,
+            "image_side": "EAST"
+        },
+        {
+            "id": 1,
+            "x_coord": 10,
+            "y_coord": 5,
+            "image_side": "WEST"
+        },
+        {
+            "id": 2,
+            "x_coord": 16,
+            "y_coord": 3,
+            "image_side": "NORTH"
+        },
+        {
+            "id": 3,
+            "x_coord": 3,
+            "y_coord": 13,
+            "image_side": "SOUTH"
+        }
+    ]
+}
