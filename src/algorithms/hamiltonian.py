@@ -1,13 +1,11 @@
 import itertools
 
 import time
-from graph import Graph
+from algorithms.graph import Graph
 
 
 def path_length(graph: Graph, path: list[str]) -> float:
-    return sum(
-        graph.edge_weight(path[i], path[i + 1]) for i in range(len(path) - 1)
-    )
+    return sum(graph.edge_weight(path[i], path[i + 1]) for i in range(len(path) - 1))
 
 
 def nearest_neighbour(graph: Graph) -> list[str]:
@@ -54,6 +52,7 @@ def exhaustive_search(graph: Graph) -> list[str]:
             best, best_length = candidate, candidate_length
 
     return best
+
 
 def run_all(graph: Graph) -> dict:
     results = {}
