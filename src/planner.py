@@ -8,8 +8,8 @@ the algorithm lives inside the RPi codebase.
 import time
 
 from algorithms.dubins import TURNING_RADIUS_CM, dubins_path, path_commands
+from algorithms.graph import Graph
 from algorithms.hamiltonian import exhaustive_search, nearest_neighbour, pairwise_swap, path_length
-from graph import Graph
 from model import Obstacle, Robot
 
 ALGORITHMS = {
@@ -33,21 +33,24 @@ def plan_mission(
     if algorithm_fn is None:
         raise ValueError(f"unknown algorithm '{algorithm}', expected one of {list(ALGORITHMS)}")
 
-    graph = Graph.build(robot, obstacles, radius=radius)
+    # Graph.build() always weighs edges at the default TURNING_RADIUS_CM (it
+    # no longer takes a radius argument); `radius` below only controls the
+    # actual leg commands generated for driving.
+    graph = Graph.build(robot, obstacles)
 
     t0 = time.perf_counter()
     order = algorithm_fn(graph)
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
-    poses = {node.id: node.pose for node in graph.nodes}
+    robots = {node.id: node.robot for node in graph.nodes}
     waypoints = [
-        {"id": node_id, "x_cm": poses[node_id].x_cm, "y_cm": poses[node_id].y_cm, "theta_rad": poses[node_id].theta_rad}
+        {"id": node_id, "x_cm": robots[node_id].x_cm, "y_cm": robots[node_id].y_cm, "theta_rad": robots[node_id].theta_rad}
         for node_id in order
     ]
 
     legs = []
     for from_id, to_id in zip(order, order[1:]):
-        path = dubins_path(poses[from_id], poses[to_id], radius)
+        path = dubins_path(robots[from_id], robots[to_id], radius)
         legs.append({"to": to_id, "commands": path_commands(path)})
 
     return {

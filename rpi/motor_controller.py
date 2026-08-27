@@ -1,46 +1,88 @@
 """
 Runs ON THE RPI - translates the drive commands produced by src/planner.py
-into the STM32 serial protocol described in PROTOCOL_en.md. Called directly
-by main.py; there is no network/API step, everything runs in one process.
+into the STM32 serial protocol. Called directly by main.py; there is no
+network/API step, everything runs in one process.
 
-Why no gyro/yaw or STEER,ANGLE: those aren't implemented on the STM yet
-(v1.5/v2/v3 per the protocol doc's phase table - only v1 is real today).
-Instead, every command - straight or turning - is executed the same way:
-set a steering angle, drive, and watch the wheel encoders (already
-implemented and calibrated in cm, v1) until `distance_cm` is covered.
-That's enough because a turn command's `distance_cm` is already the *arc
-length* to travel (see src/algorithms/dubins.py: path_commands), and arc
-length is exactly what the encoders measure, regardless of whether the
-wheels are pointed straight or turned.
+Two execution paths, chosen per command in execute_command():
 
-Two constants below MUST be measured on the real robot before this will
-drive correctly - the algorithm module has no way to know them:
-  - DRIVE_PWM: a raw MOTOR,B PWM value that gives a sensible, safe speed
-  - STEER_LEFT_US / STEER_RIGHT_US: raw servo pulse widths that produce a
-    turn at TURNING_RADIUS_CM (the radius the paths were planned for -
-    see src/algorithms/dubins.py) - not just "some turn", THAT radius,
-    otherwise the robot won't end up where the plan expects.
+  - FORWARD commands use the STM's own closed-loop routines: STRAIGHT,GOCM
+    for straight runs, TURN,START for turns. The STM handles PWM/servo/
+    gyro-correction internally - this file only starts the routine and
+    polls ...,STATUS until it reports DONE. No PWM/steering calibration
+    needed on our side for these; the STM team has already tuned them
+    (see drive_control.c: SERVO_CENTER_US=1712, BASE_PWM=2900 confirmed by
+    field testing in test_distance.c).
+
+  - Everything else falls back to the older raw MOTOR/STEER/ENC-polling
+    approach:
+      * BACKWARD (reverse) commands - neither STRAIGHT,GOCM nor TURN,START
+        takes a direction argument (see drive_control.h), so reversing is
+        only possible via raw MOTOR,B with negative PWM.
+      * Forward commands outside STRAIGHT,GOCM/TURN,START's supported
+        range - STRAIGHT,GOCM only accepts 10-500cm, TURN,START only
+        accepts |angle| >= 5deg (both enforced by the STM, see
+        drive_control.c's TURN_MIN_A_DEG / the STRAIGHT,GOCM bounds check
+        in test_uart.c) - short segments would otherwise be rejected
+        outright with ERR,BAD_VALUE.
+    This path is NOT well calibrated: no file among the STM team's
+    calibration builds tests reversing at all, so RAW_DRIVE_PWM/
+    RAW_STEER_LEFT_US/RAW_STEER_RIGHT_US below are still guesses (the
+    steering values are the STM's own "starting point, not final
+    calibration" numbers from test_turn_calib.c).
+
+KNOWN FIRMWARE BUG - verify before trusting TURN,START for both directions:
+  As of mdp20260826afternoon_STRAIGHT_and_TURN.zip's drive_control.c,
+  Turn_Start()'s steering pulse is
+      delta_us = VEH_SERVO_TURN_SIGN * delta_deg / VEH_SERVO_DEG_PER_US
+  which never references the SIGN of the requested angle_deg, and
+  Drive_Step()'s turn phase compares |yaw| to |angle_deg| (magnitude
+  only). So today TURN,START steers the same physical direction no
+  matter what sign A is - it cannot yet actually turn both left and
+  right. Flag this to whoever owns drive_control.c; the fix is to also
+  multiply delta_us by the sign of the requested angle_deg. Until it's
+  fixed, only one turn direction from this function will work correctly
+  on the real robot.
 """
 
 from __future__ import annotations
 
+import os
 import time
 
 import serial
 
-SERIAL_PORT = "COM5"  # placeholder - update to whatever port the CH9102F / RPi UART shows up as
+# Windows bench-testing (CH9102F over USB) and the real RPi (GPIO UART,
+# usually /dev/serial0) almost always need different values here - set the
+# MOTOR_SERIAL_PORT env var instead of editing this file so everyone can use
+# their own port. "COM5" is just a fallback for whoever forgets to set it.
+SERIAL_PORT = os.environ.get("MOTOR_SERIAL_PORT", "COM5")
 BAUD_RATE = 115200
 
-# --- MUST CALIBRATE on the real robot before trusting this to drive -------
-DRIVE_PWM = 3500          # TODO: measure a safe, controllable cruising PWM
-STEER_CENTER_US = 1712     # protocol doc's default center candidate
-STEER_LEFT_US = 1400        # TODO: measure - must yield TURNING_RADIUS_CM, not just "some" left turn
-STEER_RIGHT_US = 2000        # TODO: measure - must yield TURNING_RADIUS_CM, not just "some" right turn
+# Confirmed from real hardware calibration (drive_control.c / test_uart.c,
+# mdp20260826afternoon_STRAIGHT_and_TURN.zip) - shared by every path below.
+SERVO_CENTER_US = 1712
+
+# Must match algorithms/dubins.py's TURNING_RADIUS_CM - every turn command
+# from planner.py assumes paths were planned at this radius.
+TURNING_RADIUS_CM = 25
+
+# STRAIGHT,GOCM / TURN,START limits enforced by the STM (drive_control.c).
+# Commands outside these ranges are rejected outright, so we route them to
+# the raw fallback instead of sending them and getting ERR,BAD_VALUE back.
+STRAIGHT_MIN_CM = 10
+STRAIGHT_MAX_CM = 500
+TURN_MIN_ANGLE_DEG = 5
+
+# --- Raw fallback path only (backward commands, or forward commands outside
+# the ranges above). NOT confirmed - no calibration build tests reversing.
+RAW_DRIVE_PWM = 2900              # reuses the confirmed forward BASE_PWM; unverified in reverse
+RAW_STEER_LEFT_US = 1512           # test_turn_calib.c's own "starting point, not final" value
+RAW_STEER_RIGHT_US = 1912          # ditto
 # ---------------------------------------------------------------------------
 
-DISTANCE_TOLERANCE_CM = 0.5   # stop once within this much of the target
+DISTANCE_TOLERANCE_CM = 0.5    # raw fallback: stop once within this much of the target
 POLL_INTERVAL_S = 0.02
-COMMAND_TIMEOUT_S = 10.0        # safety net: abort a single command if it never reaches target
+COMMAND_TIMEOUT_S = 20.0        # safety net: abort a single command if it never completes
 
 
 class MotorControllerError(RuntimeError):
@@ -49,7 +91,7 @@ class MotorControllerError(RuntimeError):
 
 class MotorController:
     """One instance per serial connection to the STM32. Use execute_leg() /
-    execute_command() to drive the commands the algorithm API returns."""
+    execute_command() to drive the commands planner.plan_mission() returns."""
 
     def __init__(self, port: str = SERIAL_PORT, baudrate: int = BAUD_RATE, timeout: float = 1.0):
         self._ser = serial.Serial(port, baudrate, timeout=timeout)
@@ -83,39 +125,66 @@ class MotorController:
         if not response.startswith("HELLO"):
             raise MotorControllerError(f"unexpected HELLO response: {response!r}")
 
-    # --------------------------------------------------------- primitives --
+    @staticmethod
+    def _parse_fields(response: str) -> dict:
+        """'NAME,key=value,key=value' -> {'key': 'value', ...}"""
+        return dict(part.split("=", 1) for part in response.split(",")[1:] if "=" in part)
 
     def stop(self) -> None:
         self._send("STOP")
 
+    # ------------------------------------------------ forward: closed-loop --
+
+    def _drive_straight_cm(self, cm: int) -> None:
+        self._send(f"STRAIGHT,GOCM,{cm}")
+        self._poll_until_done("STRAIGHT,STATUS")
+
+    def _turn_arc(self, radius_cm: float, signed_degrees: int) -> None:
+        radius_mm = round(radius_cm * 10)
+        self._send(f"TURN,START,R={radius_mm},A={signed_degrees}")
+        self._poll_until_done("TURN,STATUS")
+
+    def _poll_until_done(self, status_command: str) -> None:
+        deadline = time.monotonic() + COMMAND_TIMEOUT_S
+        while True:
+            fields = self._parse_fields(self._send(status_command))
+            state = fields.get("state")
+            if state == "DONE":
+                return
+            if state in ("ABORTED", "TIMEOUT"):
+                raise MotorControllerError(f"{status_command} reported {state}: {fields}")
+            if time.monotonic() > deadline:
+                self.stop()
+                raise MotorControllerError(f"{status_command} never reached DONE within {COMMAND_TIMEOUT_S}s")
+            time.sleep(POLL_INTERVAL_S)
+
+    # ---------------------------------------------------- raw fallback path --
+
     def _set_steering(self, turn: str) -> None:
         if turn == "straight":
-            self._send(f"STEER,US,{STEER_CENTER_US}")
+            self._send(f"STEER,US,{SERVO_CENTER_US}")
         elif turn == "left":
-            self._send(f"STEER,US,{STEER_LEFT_US}")
+            self._send(f"STEER,US,{RAW_STEER_LEFT_US}")
         elif turn == "right":
-            self._send(f"STEER,US,{STEER_RIGHT_US}")
+            self._send(f"STEER,US,{RAW_STEER_RIGHT_US}")
         else:
             raise ValueError(f"unknown turn value: {turn!r} (expected 'left', 'right', or 'straight')")
 
     def _distance_travelled_cm(self) -> float:
         """Distance covered since the last ENC,RESET, always >= 0 regardless
         of whether the robot is driving forward or backward."""
-        response = self._send("ENC,GET,CM")  # "ENC,l_cm=<f>,r_cm=<f>"
-        fields = dict(part.split("=", 1) for part in response.split(",")[1:])
+        fields = self._parse_fields(self._send("ENC,GET,CM"))
         left_cm, right_cm = float(fields["l_cm"]), float(fields["r_cm"])
         return abs(left_cm + right_cm) / 2
 
-    # -------------------------------------------------------- public API --
-
-    def execute_command(self, command: dict) -> None:
-        """Drive one command from planner.plan_mission()'s `legs[].commands`:
-        {"direction": "forward"|"backward", "turn": "left"|"right"|"straight",
-         "distance_cm": float, "degrees": float}."""
+    def _execute_raw(self, command: dict) -> None:
+        """Open-loop fallback: fixed steering + poll encoder distance, no
+        gyro correction. Used for backward commands and for forward
+        commands too short/long/shallow for STRAIGHT,GOCM/TURN,START."""
         self._set_steering(command["turn"])
         self._send("ENC,RESET")
 
-        pwm = DRIVE_PWM if command["direction"] == "forward" else -DRIVE_PWM
+        pwm = RAW_DRIVE_PWM if command["direction"] == "forward" else -RAW_DRIVE_PWM
         self._send(f"MOTOR,B,{pwm},{pwm}")
 
         target_cm = command["distance_cm"]
@@ -124,12 +193,35 @@ class MotorController:
             while self._distance_travelled_cm() < target_cm - DISTANCE_TOLERANCE_CM:
                 if time.monotonic() > deadline:
                     raise MotorControllerError(
-                        f"command did not reach {target_cm}cm within {COMMAND_TIMEOUT_S}s "
-                        "(wheel stuck? DRIVE_PWM too low? check hardware)"
+                        f"raw command did not reach {target_cm}cm within {COMMAND_TIMEOUT_S}s "
+                        "(wheel stuck? RAW_DRIVE_PWM too low? check hardware)"
                     )
                 time.sleep(POLL_INTERVAL_S)
         finally:
             self.stop()  # always stop, even if the command timed out or raised
+
+    # -------------------------------------------------------- public API --
+
+    def execute_command(self, command: dict) -> None:
+        """Drive one command from planner.plan_mission()'s `legs[].commands`:
+        {"direction": "forward"|"backward", "turn": "left"|"right"|"straight",
+         "distance_cm": float, "degrees": float}."""
+        direction = command["direction"]
+        turn = command["turn"]
+
+        if direction == "forward" and turn == "straight":
+            cm = round(command["distance_cm"])
+            if STRAIGHT_MIN_CM <= cm <= STRAIGHT_MAX_CM:
+                self._drive_straight_cm(cm)
+                return
+        elif direction == "forward":
+            degrees = round(command["degrees"])
+            if degrees >= TURN_MIN_ANGLE_DEG:
+                signed_degrees = degrees if turn == "right" else -degrees
+                self._turn_arc(TURNING_RADIUS_CM, signed_degrees)
+                return
+
+        self._execute_raw(command)
 
     def execute_leg(self, commands: list[dict]) -> None:
         """Drive every command in one leg, in order, back to back."""
