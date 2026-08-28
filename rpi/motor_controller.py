@@ -50,12 +50,22 @@ import os
 import time
 
 import serial
+import serial.tools.list_ports
 
-# Windows bench-testing (CH9102F over USB) and the real RPi (GPIO UART,
-# usually /dev/serial0) almost always need different values here - set the
-# MOTOR_SERIAL_PORT env var instead of editing this file so everyone can use
-# their own port. "COM5" is just a fallback for whoever forgets to set it.
-SERIAL_PORT = os.environ.get("MOTOR_SERIAL_PORT", "COM5")
+
+def _autodetect_port() -> str | None:
+    """If exactly one serial device is plugged in, use it - avoids having to
+    re-set MOTOR_SERIAL_PORT every time Windows hands the CH9102F a new COM
+    number on replug. Ambiguous (0 or 2+ devices) -> None, caller falls back."""
+    ports = list(serial.tools.list_ports.comports())
+    return ports[0].device if len(ports) == 1 else None
+
+
+# Priority: explicit MOTOR_SERIAL_PORT env var (set this if autodetect picks
+# the wrong device, e.g. two serial adapters plugged in at once) -> the one
+# connected serial device, if there's exactly one -> "COM5" as a last-resort
+# fallback for whoever has neither.
+SERIAL_PORT = os.environ.get("MOTOR_SERIAL_PORT") or _autodetect_port() or "COM5"
 BAUD_RATE = 115200
 
 # Confirmed from real hardware calibration (drive_control.c / test_uart.c,
