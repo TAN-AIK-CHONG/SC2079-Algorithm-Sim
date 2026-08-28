@@ -4,17 +4,15 @@ from dataclasses import dataclass
 
 from algorithms.dubins import TURNING_RADIUS_CM, dubins_length
 from collision import footprint_in_collision
-from model import Corners, Robot
+from model import Corners, Robot, MotionPrimitive
 
-STEP_CM = 5.0
+STEP_CM = 10
 SEGMENT_SAMPLES = 2
 NUM_HEADING_BUCKETS = 72
-POS_RESOLUTION_CM = 5.0
-GOAL_POS_TOLERANCE_CM = 5.0
+POS_RESOLUTION_CM = 5
+GOAL_POS_TOLERANCE_CM = 5
 GOAL_ANGLE_TOLERANCE_RAD = math.radians(5)
-REVERSE_COST_MULTIPLIER = (
-    1.0  # Initial assumption that forward and backward driving will have the same cost
-)
+REVERSE_COST_MULTIPLIER = 1
 
 
 def _normalize_angle(theta: float) -> float:
@@ -25,22 +23,23 @@ def _normalize_angle(theta: float) -> float:
     return theta
 
 
-def _motion_primitives(step: float):
-    """(name, direction, dtheta, distance) for each available action."""
+def _motion_primitives(step: int) -> list[MotionPrimitive]:
+    """MotionPrimitive for each available action."""
     dtheta = step / TURNING_RADIUS_CM
     return [
-        ("forward_straight", 1, 0.0, step),
-        ("forward_left", 1, dtheta, step),
-        ("forward_right", 1, -dtheta, step),
-        ("reverse_straight", -1, 0.0, step),
-        ("reverse_left", -1, dtheta, step),
-        ("reverse_right", -1, -dtheta, step),
+        MotionPrimitive("forward_straight", 1, 0.0, step),
+        MotionPrimitive("forward_left", 1, dtheta, step),
+        MotionPrimitive("forward_right", 1, -dtheta, step),
+        MotionPrimitive("reverse_straight", -1, 0.0, step),
+        MotionPrimitive("reverse_left", -1, dtheta, step),
+        MotionPrimitive("reverse_right", -1, -dtheta, step),
     ]
 
 
 @dataclass
 class HybridAstarResult:
-    path: list[Robot]  # start -> ... -> goal
+    path: list[Robot]
+    primitives: list[MotionPrimitive]
     length: float
 
 
@@ -117,17 +116,19 @@ def hybrid_astar(
             return _reconstruct(came_from, start_state, key, g)
 
         current = Robot(x, y, theta)
-        for name, direction, dtheta, distance in actions:
-            new_theta = theta + dtheta
-            new_x = x + direction * distance * math.cos(theta)
-            new_y = y + direction * distance * math.sin(theta)
+        for primitive in actions:
+            new_theta = theta + primitive.dtheta
+            new_x = x + primitive.direction * primitive.distance * math.cos(theta)
+            new_y = y + primitive.direction * primitive.distance * math.sin(theta)
 
             if not _segment_collision_free(
                 current, Robot(new_x, new_y, new_theta), obstacles
             ):
                 continue
 
-            step_cost = distance * (REVERSE_COST_MULTIPLIER if direction == -1 else 1.0)
+            step_cost = primitive.distance * (
+                REVERSE_COST_MULTIPLIER if primitive.direction == -1 else 1
+            )
             new_g = g + step_cost
             new_key = state_key(new_x, new_y, new_theta)
 
@@ -137,7 +138,7 @@ def hybrid_astar(
                 continue
 
             g_scores[new_key] = new_g
-            came_from[new_key] = (key, (new_x, new_y, new_theta))
+            came_from[new_key] = (key, (new_x, new_y, new_theta), primitive)
             new_f = new_g + heuristic(new_x, new_y, new_theta)
             heapq.heappush(open_heap, (new_f, new_g, (new_x, new_y, new_theta), key))
 
@@ -146,11 +147,14 @@ def hybrid_astar(
 
 def _reconstruct(came_from, start_state, goal_key, total_length) -> HybridAstarResult:
     path = []
+    primitives = []
     key = goal_key
     while came_from.get(key) is not None:
-        prev_key, state = came_from[key]
+        prev_key, state, primitive = came_from[key]
         path.append(Robot(*state))
+        primitives.append(primitive)
         key = prev_key
     path.append(Robot(*start_state))
     path.reverse()
-    return HybridAstarResult(path=path, length=total_length)
+    primitives.reverse()
+    return HybridAstarResult(path=path, primitives=primitives, length=total_length)
