@@ -7,7 +7,7 @@ from model import Obstacle, Robot
 @dataclass(frozen=True)
 class Node:
     id: str  # "S" for start, or the obstacle's id
-    robot: Robot  # where the robot stands at this node
+    viewing_pose: Robot  # where the robot stands at this node
 
 
 @dataclass
@@ -25,7 +25,7 @@ class Graph:
         weights = {}
         for i, node_a in enumerate(nodes):
             for node_b in nodes[i + 1 :]:
-                d = dubins_length(node_a.robot, node_b.robot)
+                d = dubins_length(node_a.viewing_pose, node_b.viewing_pose)
                 weights[(node_a.id, node_b.id)] = d
                 weights[(node_b.id, node_a.id)] = d
 
