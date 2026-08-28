@@ -1,6 +1,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 ARENA_LENGTH_CM = 200
 ROBOT_FOOTPRINT_LENGTH_CM = 30
@@ -35,6 +36,21 @@ class Direction(Enum):
         """A facing is just a heading restricted to four values."""
         dx, dy = self.value
         return math.atan2(dy, dx)
+
+
+@dataclass
+class MotionPrimitive:
+    name: Literal[
+        "forward_straight",
+        "forward_left",
+        "forward_right",
+        "reverse_straight",
+        "reverse_left",
+        "reverse_right",
+    ]
+    direction: int
+    dtheta: float
+    distance: int
 
 
 @dataclass(frozen=True)
