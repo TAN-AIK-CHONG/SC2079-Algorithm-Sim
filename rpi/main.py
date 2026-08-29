@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from model import Obstacle, Robot, parse_scenario  # noqa: E402
-from planner import plan_mission  # noqa: E402
+from planner import plan_mission, PlanningError  # noqa: E402
 from motor_controller import MotorController  # noqa: E402
 
 
@@ -37,13 +37,24 @@ def main() -> None:
 
     robot, obstacles = load_scenario(Path(sys.argv[1]))
 
-    mission = plan_mission(robot, obstacles)
-    print(f"visiting order: {mission['order']}  ({mission['length_cm']:.2f}cm total)")
+    # plan_mission() returns list[Leg] (see src/planner.py) - each Leg has
+    # .from_id/.to_id/.commands. It can also raise PlanningError if
+    # hybrid_astar found no collision-free path for some leg (e.g. obstacles
+    # placed too close together, or too close to a wall for this radius).
+    try:
+        legs = plan_mission(robot, obstacles)
+    except PlanningError as exc:
+        print(f"planning failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    total_cm = sum(command.distance_cm for leg in legs for command in leg.commands)
+    order = [legs[0].from_id, *(leg.to_id for leg in legs)] if legs else []
+    print(f"visiting order: {order}  ({total_cm}cm total)")
 
     with MotorController() as controller:
-        for leg in mission["legs"]:
-            print(f"-> {leg['to']} ({len(leg['commands'])} commands)")
-            controller.execute_leg(leg["commands"])
+        for leg in legs:
+            print(f"-> {leg.to_id} ({len(leg.commands)} commands)")
+            controller.execute_leg(leg.commands)
 
     print("mission complete")
 

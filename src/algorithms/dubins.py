@@ -4,7 +4,7 @@ import rsplan
 
 from model import Robot
 
-TURNING_RADIUS_CM = 25
+TURNING_RADIUS_CM = 30  # confirmed by real-life testing on the physical robot
 
 
 def dubins_path(

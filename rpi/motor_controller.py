@@ -50,21 +50,29 @@ import os
 import time
 
 import serial
+import serial.tools.list_ports
 
-# Windows bench-testing (CH9102F over USB) and the real RPi (GPIO UART,
-# usually /dev/serial0) almost always need different values here - set the
-# MOTOR_SERIAL_PORT env var instead of editing this file so everyone can use
-# their own port. "COM5" is just a fallback for whoever forgets to set it.
-SERIAL_PORT = os.environ.get("MOTOR_SERIAL_PORT", "COM5")
+from algorithms.dubins import TURNING_RADIUS_CM  # single source of truth - see src/algorithms/dubins.py
+
+
+def _autodetect_port() -> str | None:
+    """If exactly one serial device is plugged in, use it - avoids having to
+    re-set MOTOR_SERIAL_PORT every time Windows hands the CH9102F a new COM
+    number on replug. Ambiguous (0 or 2+ devices) -> None, caller falls back."""
+    ports = list(serial.tools.list_ports.comports())
+    return ports[0].device if len(ports) == 1 else None
+
+
+# Priority: explicit MOTOR_SERIAL_PORT env var (set this if autodetect picks
+# the wrong device, e.g. two serial adapters plugged in at once) -> the one
+# connected serial device, if there's exactly one -> "COM5" as a last-resort
+# fallback for whoever has neither.
+SERIAL_PORT = os.environ.get("MOTOR_SERIAL_PORT") or _autodetect_port() or "COM5"
 BAUD_RATE = 115200
 
 # Confirmed from real hardware calibration (drive_control.c / test_uart.c,
 # mdp20260826afternoon_STRAIGHT_and_TURN.zip) - shared by every path below.
 SERVO_CENTER_US = 1712
-
-# Must match algorithms/dubins.py's TURNING_RADIUS_CM - every turn command
-# from planner.py assumes paths were planned at this radius.
-TURNING_RADIUS_CM = 25
 
 # STRAIGHT,GOCM / TURN,START limits enforced by the STM (drive_control.c).
 # Commands outside these ranges are rejected outright, so we route them to
@@ -161,14 +169,14 @@ class MotorController:
     # ---------------------------------------------------- raw fallback path --
 
     def _set_steering(self, turn: str) -> None:
-        if turn == "straight":
+        if turn == "STRAIGHT":
             self._send(f"STEER,US,{SERVO_CENTER_US}")
-        elif turn == "left":
+        elif turn == "LEFT":
             self._send(f"STEER,US,{RAW_STEER_LEFT_US}")
-        elif turn == "right":
+        elif turn == "RIGHT":
             self._send(f"STEER,US,{RAW_STEER_RIGHT_US}")
         else:
-            raise ValueError(f"unknown turn value: {turn!r} (expected 'left', 'right', or 'straight')")
+            raise ValueError(f"unknown turn value: {turn!r} (expected 'LEFT', 'RIGHT', or 'STRAIGHT')")
 
     def _distance_travelled_cm(self) -> float:
         """Distance covered since the last ENC,RESET, always >= 0 regardless
@@ -177,17 +185,17 @@ class MotorController:
         left_cm, right_cm = float(fields["l_cm"]), float(fields["r_cm"])
         return abs(left_cm + right_cm) / 2
 
-    def _execute_raw(self, command: dict) -> None:
+    def _execute_raw(self, command) -> None:
         """Open-loop fallback: fixed steering + poll encoder distance, no
         gyro correction. Used for backward commands and for forward
         commands too short/long/shallow for STRAIGHT,GOCM/TURN,START."""
-        self._set_steering(command["turn"])
+        self._set_steering(command.turn)
         self._send("ENC,RESET")
 
-        pwm = RAW_DRIVE_PWM if command["direction"] == "forward" else -RAW_DRIVE_PWM
+        pwm = RAW_DRIVE_PWM if command.direction == "FORWARD" else -RAW_DRIVE_PWM
         self._send(f"MOTOR,B,{pwm},{pwm}")
 
-        target_cm = command["distance_cm"]
+        target_cm = command.distance_cm
         deadline = time.monotonic() + COMMAND_TIMEOUT_S
         try:
             while self._distance_travelled_cm() < target_cm - DISTANCE_TOLERANCE_CM:
@@ -202,28 +210,29 @@ class MotorController:
 
     # -------------------------------------------------------- public API --
 
-    def execute_command(self, command: dict) -> None:
-        """Drive one command from planner.plan_mission()'s `legs[].commands`:
-        {"direction": "forward"|"backward", "turn": "left"|"right"|"straight",
-         "distance_cm": float, "degrees": float}."""
-        direction = command["direction"]
-        turn = command["turn"]
+    def execute_command(self, command) -> None:
+        """Drive one command from a planner.Leg's `.commands` list - a
+        planner.Command dataclass: direction "FORWARD"|"REVERSE", turn
+        "STRAIGHT"|"LEFT"|"RIGHT", distance_cm: int, swept_angle_deg: int|None
+        (None for STRAIGHT commands)."""
+        direction = command.direction
+        turn = command.turn
 
-        if direction == "forward" and turn == "straight":
-            cm = round(command["distance_cm"])
+        if direction == "FORWARD" and turn == "STRAIGHT":
+            cm = round(command.distance_cm)
             if STRAIGHT_MIN_CM <= cm <= STRAIGHT_MAX_CM:
                 self._drive_straight_cm(cm)
                 return
-        elif direction == "forward":
-            degrees = round(command["degrees"])
+        elif direction == "FORWARD":
+            degrees = round(command.swept_angle_deg)
             if degrees >= TURN_MIN_ANGLE_DEG:
-                signed_degrees = degrees if turn == "right" else -degrees
+                signed_degrees = degrees if turn == "RIGHT" else -degrees
                 self._turn_arc(TURNING_RADIUS_CM, signed_degrees)
                 return
 
         self._execute_raw(command)
 
-    def execute_leg(self, commands: list[dict]) -> None:
+    def execute_leg(self, commands: list) -> None:
         """Drive every command in one leg, in order, back to back."""
         for command in commands:
             self.execute_command(command)
