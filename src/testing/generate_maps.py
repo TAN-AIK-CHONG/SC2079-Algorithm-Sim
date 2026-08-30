@@ -25,12 +25,20 @@ ROBOT_START_CELL = (0, 0, Direction.NORTH)
 ROBOT_START = Robot.from_grid(*ROBOT_START_CELL)
 START_ZONE_CELLS = 4
 
+# Accept a random layout once at least this fraction of its obstacles are
+# reachable, rather than requiring every single one. At the real robot's
+# 30cm turning radius, demanding 100% reachability makes _generate_map()'s
+# retry loop take a very long time (most random layouts have at least one
+# obstacle hybrid_astar can't reach) - see calculate_final_path()'s
+# skip-and-continue behaviour, which this counts against.
+MIN_REACHABLE_FRACTION = 0.5
 
-def _is_fully_pathable(robot: Robot, obstacles: list[Obstacle]) -> bool:
+
+def _meets_reachability_bar(robot: Robot, obstacles: list[Obstacle]) -> bool:
     graph = Graph.build(robot, obstacles)
     order = run_all(graph)["exhaustive_search"]["path"]
-    _, _, _, failed_leg = calculate_final_path(graph, obstacles, order)
-    return failed_leg is None
+    _, _, completed_legs, _ = calculate_final_path(graph, obstacles, order)
+    return completed_legs >= len(obstacles) * MIN_REACHABLE_FRACTION
 
 
 def _viewing_pose_ok(obstacle: Obstacle, obstacles: list[Obstacle]) -> bool:
@@ -72,7 +80,7 @@ def _generate_map(
     robot: Robot, num_obstacles: int, rng: random.Random
 ) -> list[Obstacle]:
     obstacles = _generate_obstacles(num_obstacles, rng)
-    while not (_viewing_poses_ok(obstacles) and _is_fully_pathable(robot, obstacles)):
+    while not (_viewing_poses_ok(obstacles) and _meets_reachability_bar(robot, obstacles)):
         obstacles = _generate_obstacles(num_obstacles, rng)
 
     return obstacles

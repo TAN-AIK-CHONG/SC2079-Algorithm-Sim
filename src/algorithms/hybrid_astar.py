@@ -10,9 +10,29 @@ STEP_CM = 10
 SEGMENT_SAMPLES = 2
 NUM_HEADING_BUCKETS = 72
 POS_RESOLUTION_CM = 5
-GOAL_POS_TOLERANCE_CM = 5
-GOAL_ANGLE_TOLERANCE_RAD = math.radians(5)
 REVERSE_COST_MULTIPLIER = 1
+
+# Two-tier goal tolerance: try DEFAULT first, and only if that genuinely
+# finds nothing, retry once with LOOSE as a last resort.
+#
+# There used to be a third, tighter TIGHT tier (5cm/5deg) ahead of this one.
+# It was dropped: trying TIGHT first before DEFAULT never won anything -
+# every leg it couldn't solve still had to pay for TIGHT's own full
+# exhaustive-failure search (~20-60s) before falling through, and DEFAULT
+# alone was shown to solve every leg TIGHT could plus the hard ones TIGHT
+# couldn't (see the 3-tier timing comparison: adding a step-down tier
+# between TIGHT and LOOSE only cut total time from 404.5s to 400.6s across
+# a 5-trial/30-leg sample - TIGHT's own failures were the entire cost, not
+# which fallback came after). Going straight to DEFAULT is expected to
+# remove most of that ~400s.
+#
+# Re-validate against a fresh sample if TURNING_RADIUS_CM changes again -
+# these numbers are tuned to 30cm, not derived from first principles.
+DEFAULT_GOAL_POS_TOLERANCE_CM = 7
+DEFAULT_GOAL_ANGLE_TOLERANCE_RAD = math.radians(10)
+
+LOOSE_GOAL_POS_TOLERANCE_CM = 6
+LOOSE_GOAL_ANGLE_TOLERANCE_RAD = math.radians(14)
 
 
 def _normalize_angle(theta: float) -> float:
@@ -70,6 +90,27 @@ def hybrid_astar(
     goal: Robot,
     obstacles: list[Corners],
 ) -> HybridAstarResult | None:
+    """Try DEFAULT goal tolerance first; only if that finds nothing, retry
+    once with LOOSE as a last resort so a hard-to-reach obstacle still gets
+    visited, just less precisely. See the DEFAULT_/LOOSE_ constants above
+    for why there's no tighter tier ahead of DEFAULT."""
+    for pos_tolerance_cm, angle_tolerance_rad in (
+        (DEFAULT_GOAL_POS_TOLERANCE_CM, DEFAULT_GOAL_ANGLE_TOLERANCE_RAD),
+        (LOOSE_GOAL_POS_TOLERANCE_CM, LOOSE_GOAL_ANGLE_TOLERANCE_RAD),
+    ):
+        result = _search(start, goal, obstacles, pos_tolerance_cm, angle_tolerance_rad)
+        if result is not None:
+            return result
+    return None
+
+
+def _search(
+    start: Robot,
+    goal: Robot,
+    obstacles: list[Corners],
+    pos_tolerance_cm: float,
+    angle_tolerance_rad: float,
+) -> HybridAstarResult | None:
     if footprint_in_collision(start, obstacles) or footprint_in_collision(
         goal, obstacles
     ):
@@ -109,8 +150,8 @@ def hybrid_astar(
         visited.add(key)
 
         reached_goal = (
-            math.hypot(goal.x_cm - x, goal.y_cm - y) < GOAL_POS_TOLERANCE_CM
-            and abs(_normalize_angle(theta - goal.theta_rad)) < GOAL_ANGLE_TOLERANCE_RAD
+            math.hypot(goal.x_cm - x, goal.y_cm - y) < pos_tolerance_cm
+            and abs(_normalize_angle(theta - goal.theta_rad)) < angle_tolerance_rad
         )
         if reached_goal:
             return _reconstruct(came_from, start_state, key, g)

@@ -37,22 +37,26 @@ def main() -> None:
 
     robot, obstacles = load_scenario(Path(sys.argv[1]))
 
-    # plan_mission() returns list[Leg] (see src/planner.py) - each Leg has
-    # .from_id/.to_id/.commands. It can also raise PlanningError if
-    # hybrid_astar found no collision-free path for some leg (e.g. obstacles
-    # placed too close together, or too close to a wall for this radius).
+    # plan_mission() returns a MissionPlan (see src/planner.py): .legs is the
+    # drivable route, .skipped_ids lists any obstacle hybrid_astar couldn't
+    # reach from wherever the robot was at that point in the route - those
+    # are left unvisited rather than failing the whole mission. It only
+    # raises PlanningError if NOT ONE obstacle is reachable at all.
     try:
-        legs = plan_mission(robot, obstacles)
+        plan = plan_mission(robot, obstacles)
     except PlanningError as exc:
         print(f"planning failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    total_cm = sum(command.distance_cm for leg in legs for command in leg.commands)
-    order = [legs[0].from_id, *(leg.to_id for leg in legs)] if legs else []
+    if plan.skipped_ids:
+        print(f"WARNING: skipping unreachable obstacles: {plan.skipped_ids}", file=sys.stderr)
+
+    total_cm = sum(command.distance_cm for leg in plan.legs for command in leg.commands)
+    order = [plan.legs[0].from_id, *(leg.to_id for leg in plan.legs)]
     print(f"visiting order: {order}  ({total_cm}cm total)")
 
     with MotorController() as controller:
-        for leg in legs:
+        for leg in plan.legs:
             print(f"-> {leg.to_id} ({len(leg.commands)} commands)")
             controller.execute_leg(leg.commands)
 

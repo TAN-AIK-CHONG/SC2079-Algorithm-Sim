@@ -109,7 +109,7 @@ class Plan:
     node_robots: dict[str | int, Robot]
     legs: list[Leg] = field(default_factory=list)
     length_cm: float = 0.0
-    failed_leg: tuple | None = None
+    skipped_ids: list[str | int] = field(default_factory=list)  # unreachable - not visited
 
 
 # --------------------------------------------------------------------------
@@ -171,6 +171,11 @@ def generate_obstacles(count: int, rng: random.Random) -> list[Obstacle]:
 
 
 def plan_route(start: Robot, obstacles: list[Obstacle], emit) -> Plan:
+    """Plan a route over obstacles in exhaustive_search's order. If an
+    obstacle turns out to be unreachable from wherever the robot currently
+    is, it's skipped - not visited - and planning continues toward the next
+    obstacle in the order, still from the last position actually reached.
+    One unreachable obstacle no longer cancels every obstacle after it."""
     graph = Graph.build(start, obstacles)
     order = exhaustive_search(graph)
     emit(
@@ -178,22 +183,24 @@ def plan_route(start: Robot, obstacles: list[Obstacle], emit) -> Plan:
         f"  [{path_length(graph, order):.0f}cm as Reeds-Shepp hops]"
     )
 
-    node_robots = {node.id: node.robot for node in graph.nodes}
+    node_robots = {node.id: node.viewing_pose for node in graph.nodes}
     footprints = [obstacle.footprint_corners_cm() for obstacle in obstacles]
     plan = Plan(order=order, node_robots=node_robots)
 
-    for from_id, to_id in zip(order, order[1:]):
-        result = hybrid_astar(node_robots[from_id], node_robots[to_id], footprints)
+    current_id = order[0]  # "S"
+    for target_id in order[1:]:
+        result = hybrid_astar(node_robots[current_id], node_robots[target_id], footprints)
         if result is None:
-            plan.failed_leg = (from_id, to_id)
-            emit(f"Leg {from_id} -> {to_id}: NO PATH FOUND, stopping here")
-            return plan
+            plan.skipped_ids.append(target_id)
+            emit(f"Leg {current_id} -> {target_id}: NO PATH FOUND, skipping obstacle {target_id}")
+            continue  # stay at current_id, try the next obstacle in the order instead
 
-        plan.legs.append(Leg(to_id, result.path, result.length))
+        plan.legs.append(Leg(target_id, result.path, result.length))
         plan.length_cm += result.length
         emit(
-            f"Leg {from_id} -> {to_id}: {result.length:.0f}cm over {len(result.path)} steps"
+            f"Leg {current_id} -> {target_id}: {result.length:.0f}cm over {len(result.path)} steps"
         )
+        current_id = target_id
 
     return plan
 
@@ -753,12 +760,19 @@ class SimulatorApp:
         self._draw_robot()
         self._set_busy(False)
 
-        if plan.failed_leg is not None:
-            from_id, to_id = plan.failed_leg
-            self.status_var.set(f"Planning stopped: no path {from_id} -> {to_id}.")
+        if not plan.legs:
+            self.status_var.set("Planning failed: no obstacle is reachable at all.")
+            self._log("Planning failed: not one obstacle in the layout is reachable.")
+            return
+
+        if plan.skipped_ids:
+            self.status_var.set(
+                f"Path planned: {len(plan.legs)} legs, {plan.length_cm:.0f}cm total "
+                f"({len(plan.skipped_ids)} obstacle(s) skipped)."
+            )
             self._log(
-                f"Planned {len(plan.legs)}/{len(plan.order) - 1} legs "
-                f"({plan.length_cm:.0f}cm) before failing at {from_id} -> {to_id}."
+                f"Path planned: {len(plan.legs)} legs, {plan.length_cm:.0f}cm total. "
+                f"Skipped unreachable obstacles: {plan.skipped_ids}."
             )
             return
 

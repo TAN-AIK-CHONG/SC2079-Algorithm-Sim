@@ -51,15 +51,15 @@ def load_map(path: Path):
 def plan(robot, obstacles):
     graph = Graph.build(robot, obstacles)
     order = run_all(graph)["exhaustive_search"]["path"]
-    final_path, length_cm, completed_legs, failed_leg = calculate_final_path(
+    final_path, length_cm, completed_legs, skipped_legs = calculate_final_path(
         graph, obstacles, order
     )
-    return order, final_path, length_cm, completed_legs, failed_leg
+    return order, final_path, length_cm, completed_legs, skipped_legs
 
 
 def render(map_path: Path, out_path: Path):
     robot, obstacles = load_map(map_path)
-    order, final_path, length_cm, completed_legs, failed_leg = plan(robot, obstacles)
+    order, final_path, length_cm, completed_legs, skipped_legs = plan(robot, obstacles)
 
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.set_xlim(0, ARENA_LENGTH_CM)
@@ -114,7 +114,7 @@ def render(map_path: Path, out_path: Path):
         ax.plot(xs, ys, color="#1f77b4", linewidth=1.5, zorder=2, label="planned path")
 
     # Viewing pose markers, in visit order.
-    node_robots = {node.id: node.robot for node in Graph.build(robot, obstacles).nodes}
+    node_robots = {node.id: node.viewing_pose for node in Graph.build(robot, obstacles).nodes}
     for visit_index, node_id in enumerate(order):
         node_robot = node_robots[node_id]
         label = "S" if node_id == "S" else node_id
@@ -138,8 +138,8 @@ def render(map_path: Path, out_path: Path):
 
     status = (
         "complete"
-        if failed_leg is None
-        else f"FAILED at leg {failed_leg[0]}->{failed_leg[1]}"
+        if not skipped_legs
+        else f"skipped {len(skipped_legs)}: " + ", ".join(f"{a}->{b}" for a, b in skipped_legs)
     )
     ax.set_title(
         f"{map_path.stem}  |  {len(obstacles)} obstacles  |  "

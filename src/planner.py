@@ -10,11 +10,10 @@ from typing import Literal, Optional, Union
 
 
 class PlanningError(RuntimeError):
-    """A leg had no collision-free path; the mission cannot be driven as ordered."""
-
-    # We should probably implement something here in case no collision-free path is calculated
-    # maybe recalculate with a smaller robot footprint + allow robot footprint to move slightly outside of the arena
-    pass
+    """Raised only when NOT A SINGLE obstacle in the mission is reachable
+    from the start - i.e. there is nothing at all to drive. An individual
+    obstacle that hybrid_astar can't reach from wherever the robot currently
+    is does NOT raise this; it's skipped instead (see plan_mission)."""
 
 
 @dataclass
@@ -35,6 +34,12 @@ class Leg:
     from_id: Union[Literal["S"], int]  # "S" for the initial leg, else obstacle id
     to_id: int
     commands: list[Command]
+
+
+@dataclass
+class MissionPlan:
+    legs: list[Leg]
+    skipped_ids: list[int]  # obstacles hybrid_astar could not reach - NOT visited, not in legs
 
 
 def _combine_straights(straight_primitives: list[MotionPrimitive]) -> Command:
@@ -74,24 +79,52 @@ def _primitives_to_commands(primitives: list[MotionPrimitive]) -> list[Command]:
     return commands
 
 
-def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> list[Leg]:
+def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
+    """Plan a mission visiting obstacles in the order exhaustive_search picks.
+
+    If hybrid_astar can't find a collision-free path from wherever the robot
+    currently is to the next obstacle in that order, that obstacle is
+    skipped (left unvisited) rather than failing the whole mission - the
+    robot just continues on toward the next obstacle in the order, still
+    from its last successfully-reached position. Skipped obstacles are
+    reported back in MissionPlan.skipped_ids rather than silently dropped,
+    since not visiting one means lost points in the real run and whoever
+    calls this needs to know.
+
+    Note: the visiting order itself is decided once up front (by Dubins
+    distance, ignoring obstacles) and is NOT re-optimised after a skip - the
+    remaining stops are visited in their original relative order, not
+    necessarily the shortest order for what's left.
+
+    Raises PlanningError only if NOT ONE obstacle in the mission is
+    reachable at all (nothing to drive).
+    """
     graph = Graph.build(robot, obstacles)
     order = exhaustive_search(graph)
 
     id_pose_map = {node.id: node.viewing_pose for node in graph.nodes}
     footprints = [obstacle.footprint_corners_cm() for obstacle in obstacles]
 
-    legs = []
-    for from_id, to_id in zip(order, order[1:]):
-        result = hybrid_astar(id_pose_map[from_id], id_pose_map[to_id], footprints)
+    legs: list[Leg] = []
+    skipped_ids: list[int] = []
+    current_id = order[0]  # "S"
+
+    for target_id in order[1:]:
+        result = hybrid_astar(id_pose_map[current_id], id_pose_map[target_id], footprints)
         if result is None:
-            raise PlanningError(f"no collision-free path for leg {from_id} -> {to_id}")
+            skipped_ids.append(target_id)
+            continue  # stay at current_id, try the next obstacle in the order instead
+
         legs.append(
             Leg(
-                from_id="S" if not legs else from_id,
-                to_id=to_id,
+                from_id=current_id,
+                to_id=target_id,
                 commands=_primitives_to_commands(result.primitives),
             )
         )
+        current_id = target_id
 
-    return legs
+    if not legs:
+        raise PlanningError("no obstacle in the mission is reachable from the start")
+
+    return MissionPlan(legs=legs, skipped_ids=skipped_ids)
