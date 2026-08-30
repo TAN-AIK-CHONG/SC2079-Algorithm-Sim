@@ -153,6 +153,15 @@ class MotorController:
         self._poll_until_done("TURN,STATUS")
 
     def _poll_until_done(self, status_command: str) -> None:
+        # e.g. "STRAIGHT,STATUS" -> "STRAIGHT,STOP". Deliberately NOT the raw
+        # STOP command here: STRAIGHT/TURN run as a non-blocking state machine
+        # on the STM (drive_control.c) that keeps stepping every ~20ms while
+        # it thinks it's RUNNING - raw STOP only zeroes PWM at that instant,
+        # it doesn't tell the state machine to stop, so it could re-assert
+        # PWM on its very next tick and fight our "stop". STRAIGHT,STOP/
+        # TURN,STOP call Drive_Stop(), which both aborts the state machine
+        # AND zeroes PWM - the actually-safe way to cut this short.
+        mode_stop_command = status_command.replace(",STATUS", ",STOP")
         deadline = time.monotonic() + COMMAND_TIMEOUT_S
         while True:
             fields = self._parse_fields(self._send(status_command))
@@ -162,7 +171,7 @@ class MotorController:
             if state in ("ABORTED", "TIMEOUT"):
                 raise MotorControllerError(f"{status_command} reported {state}: {fields}")
             if time.monotonic() > deadline:
-                self.stop()
+                self._send(mode_stop_command)
                 raise MotorControllerError(f"{status_command} never reached DONE within {COMMAND_TIMEOUT_S}s")
             time.sleep(POLL_INTERVAL_S)
 

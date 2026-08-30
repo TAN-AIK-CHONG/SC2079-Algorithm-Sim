@@ -34,6 +34,25 @@ DEFAULT_GOAL_ANGLE_TOLERANCE_RAD = math.radians(10)
 LOOSE_GOAL_POS_TOLERANCE_CM = 6
 LOOSE_GOAL_ANGLE_TOLERANCE_RAD = math.radians(14)
 
+# Extra cost (in cm-equivalent) charged when a primitive's type differs from
+# the one immediately before it (e.g. forward_left -> forward_right). With
+# no penalty, alternating primitives cost exactly the same as a long run of
+# one type - the search has no reason to prefer either, so it can produce
+# stuttery FL/FR/FL/FR... paths where a real (if only approximately as
+# short) run would do. This biases A* toward committing to a maneuver
+# instead, without smoothing anything after the fact - every pose in the
+# result still maps to an exact primitive, so the command list stays exact.
+#
+# Swept 0/3/5/8/10/15 against the same 5-trial/30-leg sample used to
+# validate the goal tolerance: transitions/commands drop fast from 0->3
+# (226->150, -34%) then flatten hard (140 at 5, 133 at 10, 123 at 15) while
+# time keeps climbing roughly linearly with the penalty (46s -> 66s -> 76s
+# -> 106s -> 112s -> 171s). 5 sits just past the steep part of the curve -
+# most of the available smoothing for a fraction of the cost of going
+# further. Re-validate reachability and re-sweep if TURNING_RADIUS_CM or
+# STEP_CM change.
+TURN_CHANGE_PENALTY_CM = 5
+
 
 def _normalize_angle(theta: float) -> float:
     while theta > math.pi:
@@ -122,28 +141,37 @@ def _search(
     actions = _motion_primitives(STEP_CM)
     heading_res = 2 * math.pi / NUM_HEADING_BUCKETS
 
-    def state_key(x, y, theta):
+    def state_key(x, y, theta, last_primitive_name):
+        # last_primitive_name is part of the state's identity, not just
+        # bookkeeping: two arrivals at the same (x, y, theta) via different
+        # primitive types are genuinely different states for this search,
+        # since they lead to different transition costs going forward. If
+        # last_primitive_name were left out here, whichever arrival happened
+        # to have lower g would silently win the dedup and the other type's
+        # "committed to this maneuver" history would be lost, undermining
+        # the whole point of the penalty below.
         return (
             round(x / POS_RESOLUTION_CM),
             round(y / POS_RESOLUTION_CM),
             round(_normalize_angle(theta) / heading_res) % NUM_HEADING_BUCKETS,
+            last_primitive_name,
         )
 
     def heuristic(x, y, theta):
         return dubins_length(Robot(x, y, theta), goal)
 
     start_state = (start.x_cm, start.y_cm, start.theta_rad)
-    start_key = state_key(*start_state)
+    start_key = state_key(*start_state, None)
 
-    open_heap = [(heuristic(*start_state), 0.0, start_state, None)]
+    open_heap = [(heuristic(*start_state), 0.0, start_state, None, None)]
     came_from = {start_key: None}
     g_scores = {start_key: 0.0}
     visited = set()
 
     while open_heap:
-        _, g, state, _ = heapq.heappop(open_heap)
+        _, g, state, _, last_primitive_name = heapq.heappop(open_heap)
         x, y, theta = state
-        key = state_key(x, y, theta)
+        key = state_key(x, y, theta, last_primitive_name)
 
         if key in visited:
             continue
@@ -170,8 +198,10 @@ def _search(
             step_cost = primitive.distance * (
                 REVERSE_COST_MULTIPLIER if primitive.direction == -1 else 1
             )
+            if last_primitive_name is not None and primitive.name != last_primitive_name:
+                step_cost += TURN_CHANGE_PENALTY_CM
             new_g = g + step_cost
-            new_key = state_key(new_x, new_y, new_theta)
+            new_key = state_key(new_x, new_y, new_theta, primitive.name)
 
             if new_key in visited:
                 continue
@@ -181,7 +211,7 @@ def _search(
             g_scores[new_key] = new_g
             came_from[new_key] = (key, (new_x, new_y, new_theta), primitive)
             new_f = new_g + heuristic(new_x, new_y, new_theta)
-            heapq.heappush(open_heap, (new_f, new_g, (new_x, new_y, new_theta), key))
+            heapq.heappush(open_heap, (new_f, new_g, (new_x, new_y, new_theta), key, primitive.name))
 
     return None
 

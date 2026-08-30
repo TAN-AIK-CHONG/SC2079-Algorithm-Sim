@@ -166,7 +166,8 @@ def test_turn_never_completing_times_out_and_stops(controller, monkeypatch):
     with pytest.raises(mc.MotorControllerError, match="never reached DONE"):
         controller.execute_command(Command("FORWARD", "RIGHT", 15, swept_angle_deg=30))
 
-    assert controller._ser.sent[-1] == "STOP"
+    # TURN,STOP (not raw STOP) - see _poll_until_done's comment for why.
+    assert controller._ser.sent[-1] == "TURN,STOP"
 
 
 def test_raw_command_times_out_if_target_never_reached(controller, monkeypatch):
