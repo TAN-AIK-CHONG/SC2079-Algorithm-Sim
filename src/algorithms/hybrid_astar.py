@@ -182,7 +182,7 @@ def _search(
             and abs(_normalize_angle(theta - goal.theta_rad)) < angle_tolerance_rad
         )
         if reached_goal:
-            return _reconstruct(came_from, start_state, key, g)
+            return _reconstruct(came_from, start_state, key)
 
         current = Robot(x, y, theta)
         for primitive in actions:
@@ -216,7 +216,7 @@ def _search(
     return None
 
 
-def _reconstruct(came_from, start_state, goal_key, total_length) -> HybridAstarResult:
+def _reconstruct(came_from, start_state, goal_key) -> HybridAstarResult:
     path = []
     primitives = []
     key = goal_key
@@ -228,4 +228,10 @@ def _reconstruct(came_from, start_state, goal_key, total_length) -> HybridAstarR
     path.append(Robot(*start_state))
     path.reverse()
     primitives.reverse()
-    return HybridAstarResult(path=path, primitives=primitives, length=total_length)
+    # Real physical distance driven - NOT the search's internal g-score,
+    # which also carries TURN_CHANGE_PENALTY_CM (an artificial cost that
+    # biases the search toward smoother paths, not a real distance driven).
+    # Conflating the two would overstate reported/displayed path lengths by
+    # however many primitive-type transitions the path has.
+    length = sum(p.distance for p in primitives)
+    return HybridAstarResult(path=path, primitives=primitives, length=length)
