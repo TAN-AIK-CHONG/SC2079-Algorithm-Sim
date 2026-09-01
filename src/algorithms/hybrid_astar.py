@@ -14,20 +14,6 @@ REVERSE_COST_MULTIPLIER = 1
 
 # Two-tier goal tolerance: try DEFAULT first, and only if that genuinely
 # finds nothing, retry once with LOOSE as a last resort.
-#
-# There used to be a third, tighter TIGHT tier (5cm/5deg) ahead of this one.
-# It was dropped: trying TIGHT first before DEFAULT never won anything -
-# every leg it couldn't solve still had to pay for TIGHT's own full
-# exhaustive-failure search (~20-60s) before falling through, and DEFAULT
-# alone was shown to solve every leg TIGHT could plus the hard ones TIGHT
-# couldn't (see the 3-tier timing comparison: adding a step-down tier
-# between TIGHT and LOOSE only cut total time from 404.5s to 400.6s across
-# a 5-trial/30-leg sample - TIGHT's own failures were the entire cost, not
-# which fallback came after). Going straight to DEFAULT is expected to
-# remove most of that ~400s.
-#
-# Re-validate against a fresh sample if TURNING_RADIUS_CM changes again -
-# these numbers are tuned to 30cm, not derived from first principles.
 DEFAULT_GOAL_POS_TOLERANCE_CM = 7
 DEFAULT_GOAL_ANGLE_TOLERANCE_RAD = math.radians(10)
 
@@ -41,16 +27,7 @@ LOOSE_GOAL_ANGLE_TOLERANCE_RAD = math.radians(14)
 # stuttery FL/FR/FL/FR... paths where a real (if only approximately as
 # short) run would do. This biases A* toward committing to a maneuver
 # instead, without smoothing anything after the fact - every pose in the
-# result still maps to an exact primitive, so the command list stays exact.
-#
-# Swept 0/3/5/8/10/15 against the same 5-trial/30-leg sample used to
-# validate the goal tolerance: transitions/commands drop fast from 0->3
-# (226->150, -34%) then flatten hard (140 at 5, 133 at 10, 123 at 15) while
-# time keeps climbing roughly linearly with the penalty (46s -> 66s -> 76s
-# -> 106s -> 112s -> 171s). 5 sits just past the steep part of the curve -
-# most of the available smoothing for a fraction of the cost of going
-# further. Re-validate reachability and re-sweep if TURNING_RADIUS_CM or
-# STEP_CM change.
+# result still maps to an exact primitive, so the command list stays exact
 TURN_CHANGE_PENALTY_CM = 5
 
 
@@ -63,19 +40,6 @@ def _normalize_angle(theta: float) -> float:
 
 
 def _motion_primitives(step: int) -> list[MotionPrimitive]:
-    """MotionPrimitive for each available action.
-
-    dtheta's sign is the TRUE resulting heading change, per the standard
-    bicycle-model kinematics: dtheta/dt = (v/L) * tan(steering angle).
-    Since v (signed velocity) multiplies in, reversing with the SAME
-    steering side flips the sign of the heading change relative to driving
-    forward with that side - the well-known "reversing swings the car the
-    opposite way" behaviour from parallel parking. So reverse_left (same
-    physical wheel angle as forward_left, only going backward) carries the
-    SAME dtheta sign as forward_right, not forward_left - and vice versa
-    for reverse_right. Getting this backward would make the search's
-    simulated heading rotate the wrong way on every reverse turn, which
-    then corrupts every pose chained after it in that leg."""
     dtheta = step / TURNING_RADIUS_CM
     return [
         MotionPrimitive("forward_straight", 1, 0.0, step),
@@ -121,10 +85,6 @@ def hybrid_astar(
     goal: Robot,
     obstacles: list[Corners],
 ) -> HybridAstarResult | None:
-    """Try DEFAULT goal tolerance first; only if that finds nothing, retry
-    once with LOOSE as a last resort so a hard-to-reach obstacle still gets
-    visited, just less precisely. See the DEFAULT_/LOOSE_ constants above
-    for why there's no tighter tier ahead of DEFAULT."""
     for pos_tolerance_cm, angle_tolerance_rad in (
         (DEFAULT_GOAL_POS_TOLERANCE_CM, DEFAULT_GOAL_ANGLE_TOLERANCE_RAD),
         (LOOSE_GOAL_POS_TOLERANCE_CM, LOOSE_GOAL_ANGLE_TOLERANCE_RAD),
