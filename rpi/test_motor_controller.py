@@ -10,8 +10,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-# motor_controller.py imports TURNING_RADIUS_CM from algorithms.dubins (src/),
-# so src/ must be importable before "import motor_controller" below.
+# motor_controller.py imports LEFT/RIGHT_TURNING_RADIUS_CM from
+# algorithms.hybrid_astar (src/), so src/ must be importable before
+# "import motor_controller" below.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import motor_controller as mc
@@ -109,13 +110,13 @@ def test_forward_right_turn_uses_turn_right_with_positive_angle(controller):
     # protocol v1.8: direction is the command name (TURN,RIGHT), A>0 = forward.
     controller._ser.sent.clear()
     controller.execute_command(Command("FORWARD", "RIGHT", 15, swept_angle_deg=30))
-    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.TURNING_RADIUS_CM)},A=30"
+    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.RIGHT_TURNING_RADIUS_CM)},A=30"
 
 
 def test_forward_left_turn_uses_turn_left_with_positive_angle(controller):
     controller._ser.sent.clear()
     controller.execute_command(Command("FORWARD", "LEFT", 15, swept_angle_deg=30))
-    assert controller._ser.sent[0] == f"TURN,LEFT,R={round(mc.TURNING_RADIUS_CM)},A=30"
+    assert controller._ser.sent[0] == f"TURN,LEFT,R={round(mc.LEFT_TURNING_RADIUS_CM)},A=30"
 
 
 def test_reverse_turn_now_also_uses_closed_loop_with_negative_angle(controller):
@@ -124,7 +125,7 @@ def test_reverse_turn_now_also_uses_closed_loop_with_negative_angle(controller):
     # REVERSE STRAIGHT still needs the fallback (see test below).
     controller._ser.sent.clear()
     controller.execute_command(Command("REVERSE", "RIGHT", 15, swept_angle_deg=30))
-    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.TURNING_RADIUS_CM)},A=-30"
+    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.RIGHT_TURNING_RADIUS_CM)},A=-30"
     assert not any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
 
 
@@ -153,6 +154,21 @@ def test_shallow_turn_falls_back_to_raw(controller):
     assert any(c == f"STEER,US,{mc.RAW_STEER_LEFT_US}" for c in controller._ser.sent)
 
 
+def test_left_and_right_turns_use_different_planned_radii(controller):
+    # hybrid_astar.py plans LEFT/RIGHT arcs at different radii (see
+    # LEFT_TURNING_RADIUS_CM/RIGHT_TURNING_RADIUS_CM) - the STM must be sent
+    # the same radius the arc was actually planned with, not a shared
+    # constant, or the physical arc diverges from the planned path.
+    assert mc.LEFT_TURNING_RADIUS_CM != mc.RIGHT_TURNING_RADIUS_CM
+
+    controller._ser.sent.clear()
+    controller.execute_command(Command("FORWARD", "LEFT", 15, swept_angle_deg=30))
+    controller.execute_command(Command("FORWARD", "RIGHT", 15, swept_angle_deg=30))
+
+    assert controller._ser.sent[0] == f"TURN,LEFT,R={round(mc.LEFT_TURNING_RADIUS_CM)},A=30"
+    assert controller._ser.sent[2] == f"TURN,RIGHT,R={round(mc.RIGHT_TURNING_RADIUS_CM)},A=30"
+
+
 def test_execute_leg_runs_every_command_in_order(controller):
     commands = [
         Command("FORWARD", "RIGHT", 15, swept_angle_deg=30),
@@ -161,7 +177,7 @@ def test_execute_leg_runs_every_command_in_order(controller):
     controller._ser.sent.clear()
     controller.execute_leg(commands)
 
-    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.TURNING_RADIUS_CM)},A=30"
+    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.RIGHT_TURNING_RADIUS_CM)},A=30"
     assert "STRAIGHT,GOCM,20" in controller._ser.sent
 
 

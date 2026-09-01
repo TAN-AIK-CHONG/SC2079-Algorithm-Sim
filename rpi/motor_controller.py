@@ -13,7 +13,10 @@ import time
 import serial
 import serial.tools.list_ports
 
-from algorithms.dubins import TURNING_RADIUS_CM  # single source of truth - see src/algorithms/dubins.py
+from algorithms.hybrid_astar import LEFT_TURNING_RADIUS_CM, RIGHT_TURNING_RADIUS_CM  # single source of truth
+# - the radii the paths were actually planned at (see src/algorithms/hybrid_astar.py's
+# _motion_primitives). Must send the STM the same radius the arc was planned with, or the
+# physical robot's arc won't match the planned path.
 
 
 def _autodetect_port() -> str | None:
@@ -195,7 +198,8 @@ class MotorController:
             degrees = round(command.swept_angle_deg)
             if degrees >= TURN_MIN_ANGLE_DEG:
                 signed_degrees = degrees if direction == "FORWARD" else -degrees
-                self._turn_arc(turn, TURNING_RADIUS_CM, signed_degrees)
+                radius_cm = LEFT_TURNING_RADIUS_CM if turn == "LEFT" else RIGHT_TURNING_RADIUS_CM
+                self._turn_arc(turn, radius_cm, signed_degrees)
                 return
 
         self._execute_raw(command)
