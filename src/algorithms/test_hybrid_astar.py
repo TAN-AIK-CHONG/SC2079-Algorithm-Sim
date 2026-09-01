@@ -7,8 +7,11 @@ way" behaviour familiar from parallel parking). Getting this backward
 silently corrupts every pose the search chains after a reverse turn, with
 no test anywhere else catching it (planner.py's and motor_controller.py's
 own tests all mock around this layer). Run with:
-pytest src/algorithms/test_hybrid_astar.py (from the repo root) or
-pytest test_hybrid_astar.py (from inside src/algorithms/).
+pytest algorithms/test_hybrid_astar.py (from inside src/) - the plain
+"algorithms.hybrid_astar" import below only resolves once src/ itself is on
+sys.path, which needs src/ as the cwd; pointing pytest at this file from
+anywhere else (e.g. the repo root) raises ModuleNotFoundError: No module
+named 'algorithms'.
 """
 
 from algorithms.hybrid_astar import _motion_primitives
