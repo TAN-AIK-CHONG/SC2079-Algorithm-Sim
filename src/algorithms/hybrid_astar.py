@@ -2,7 +2,7 @@ import heapq
 import math
 from dataclasses import dataclass
 
-from algorithms.dubins import TURNING_RADIUS_CM, dubins_length
+from algorithms.dubins import dubins_length
 from collision import footprint_in_collision
 from model import Corners, Robot, MotionPrimitive
 
@@ -11,6 +11,8 @@ SEGMENT_SAMPLES = 2
 NUM_HEADING_BUCKETS = 72
 POS_RESOLUTION_CM = 5
 REVERSE_COST_MULTIPLIER = 1
+LEFT_TURNING_RADIUS_CM = 18
+RIGHT_TURNING_RADIUS_CM = 35
 
 # Two-tier goal tolerance: try DEFAULT first, and only if that genuinely
 # finds nothing, retry once with LOOSE as a last resort.
@@ -40,14 +42,15 @@ def _normalize_angle(theta: float) -> float:
 
 
 def _motion_primitives(step: int) -> list[MotionPrimitive]:
-    dtheta = step / TURNING_RADIUS_CM
+    dtheta_left = step / LEFT_TURNING_RADIUS_CM
+    dtheta_right = step / RIGHT_TURNING_RADIUS_CM
     return [
         MotionPrimitive("forward_straight", 1, 0.0, step),
-        MotionPrimitive("forward_left", 1, dtheta, step),
-        MotionPrimitive("forward_right", 1, -dtheta, step),
+        MotionPrimitive("forward_left", 1, dtheta_left, step),
+        MotionPrimitive("forward_right", 1, -dtheta_right, step),
         MotionPrimitive("reverse_straight", -1, 0.0, step),
-        MotionPrimitive("reverse_left", -1, -dtheta, step),
-        MotionPrimitive("reverse_right", -1, dtheta, step),
+        MotionPrimitive("reverse_left", -1, -dtheta_left, step),
+        MotionPrimitive("reverse_right", -1, dtheta_right, step),
     ]
 
 
