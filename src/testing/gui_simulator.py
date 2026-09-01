@@ -22,6 +22,7 @@ from algorithms.graph import Graph
 from algorithms.hamiltonian import exhaustive_search, path_length
 from algorithms.hybrid_astar import hybrid_astar
 from collision import footprint_in_collision
+from planner import Command, _apply_command, _primitives_to_commands
 from model import (
     ARENA_LENGTH_CM,
     GRID_LENGTH_CM,
@@ -54,6 +55,11 @@ IMAGE_IDS = tuple(range(11, 41))  # the target IDs the camera can come back with
 ANIMATION_MS = 40  # one path step (5cm of driving) per tick
 POLL_MS = 50  # how often the UI drains the planner thread's queue
 VIEWING_PAUSE_MS = 3000  # how long the robot sits at a viewing pose "taking a photo"
+
+# Arc-length spacing between poses sampled along a leg's true (smoothed)
+# trajectory - independent of hybrid_astar's STEP_CM, which only governs the
+# search's own discretisation, not how finely we render its result.
+SAMPLE_STEP_CM = 5
 
 # Speed multipliers divide ANIMATION_MS, so larger is faster. The top of the
 # range is the pace the simulator used to run at by default.
@@ -170,6 +176,28 @@ def generate_obstacles(count: int, rng: random.Random) -> list[Obstacle]:
 # --------------------------------------------------------------------------
 
 
+def _arc_poses(start: Robot, command: Command, step_cm: float) -> list[Robot]:
+    """Sample poses along a Command's true path via planner._apply_command -
+    a straight line, or a true circular arc at the radius implied by
+    distance_cm/swept_angle_deg, not hybrid_astar's per-step
+    chord-then-rotate approximation. This is what the robot will actually
+    drive, since Command is exactly what planner.py hands to the STM32."""
+    n_samples = max(1, round(command.distance_cm / step_cm))
+    return [
+        _apply_command(start, command, command.distance_cm * i / n_samples)
+        for i in range(1, n_samples + 1)
+    ]
+
+
+def _leg_poses(start: Robot, commands: list[Command]) -> list[Robot]:
+    """The full smoothed trajectory for a leg: straights and true arcs
+    chained end to end, one Command at a time."""
+    poses = [start]
+    for command in commands:
+        poses.extend(_arc_poses(poses[-1], command, SAMPLE_STEP_CM))
+    return poses
+
+
 def plan_route(start: Robot, obstacles: list[Obstacle], emit) -> Plan:
     """Plan a route over obstacles in exhaustive_search's order. If an
     obstacle turns out to be unreachable from wherever the robot currently
@@ -188,19 +216,27 @@ def plan_route(start: Robot, obstacles: list[Obstacle], emit) -> Plan:
     plan = Plan(order=order, node_robots=node_robots)
 
     current_id = order[0]  # "S"
+    current_pose = node_robots[current_id]  # updated to the actual pose reached after each leg
     for target_id in order[1:]:
-        result = hybrid_astar(node_robots[current_id], node_robots[target_id], footprints)
+        result = hybrid_astar(current_pose, node_robots[target_id], footprints)
         if result is None:
             plan.skipped_ids.append(target_id)
             emit(f"Leg {current_id} -> {target_id}: NO PATH FOUND, skipping obstacle {target_id}")
-            continue  # stay at current_id, try the next obstacle in the order instead
+            continue  # stay at current_id/current_pose, try the next obstacle in the order instead
 
-        plan.legs.append(Leg(target_id, result.path, result.length))
+        commands = _primitives_to_commands(result.primitives)
+        poses = _leg_poses(current_pose, commands)
+        plan.legs.append(Leg(target_id, poses, result.length))
         plan.length_cm += result.length
         emit(
-            f"Leg {current_id} -> {target_id}: {result.length:.0f}cm over {len(result.path)} steps"
+            f"Leg {current_id} -> {target_id}: {result.length:.0f}cm over {len(commands)} commands"
         )
         current_id = target_id
+        # Not node_robots[target_id]: hybrid_astar only guarantees landing
+        # within its goal tolerance of the viewing pose, so the next leg
+        # must plan from where the robot will actually be - the same pose
+        # the drawn/animated trajectory for this leg ends on.
+        current_pose = poses[-1]
 
     return plan
 
