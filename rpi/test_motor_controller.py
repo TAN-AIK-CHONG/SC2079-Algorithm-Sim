@@ -1,9 +1,9 @@
 """
 Tests motor_controller.py's logic against a *fake* serial port (no real
 STM32 needed) - verifies the command sequence and routing (STRAIGHT,GOCM /
-TURN,START vs raw fallback) are correct, independent of whatever the real
-calibration constants turn out to be. Run with: pytest test_motor_controller.py
-(from inside rpi/)
+TURN,LEFT/RIGHT vs raw fallback) are correct, independent of whatever the
+real calibration constants turn out to be. Run with:
+pytest test_motor_controller.py (from inside rpi/)
 """
 
 import sys
@@ -51,7 +51,7 @@ class FakeSerial:
             self._driving = False
         elif command == "ENC,GET,CM" and self._driving:
             self._distance_cm += self._cm_per_poll
-        elif command.startswith("STRAIGHT,GOCM,") or command.startswith("TURN,START,"):
+        elif command.startswith("STRAIGHT,GOCM,") or command.startswith("TURN,LEFT,") or command.startswith("TURN,RIGHT,"):
             self._status_polls = 0
 
         self._pending_response = self._respond_to(command)
@@ -67,13 +67,14 @@ class FakeSerial:
             self._status_polls += 1
             state = self.done_state if self._status_polls >= self.polls_until_done else "RUNNING"
             return f"STRAIGHT,state={state},elapsed=100,target_cm=10.000,l_cm=10.000,r_cm=10.000,diff_cm=0.000,yaw=0.000"
-        if command.startswith("TURN,START,"):
+        if command.startswith("TURN,LEFT,") or command.startswith("TURN,RIGHT,"):
+            dir_ = "LEFT" if command.startswith("TURN,LEFT,") else "RIGHT"
             parts = dict(p.split("=", 1) for p in command.split(",")[2:])
-            return f"OK,r={parts['R']},a={parts['A']}"
+            return f"OK,dir={dir_},r_cm={parts['R']},a={parts['A']}"
         if command == "TURN,STATUS":
             self._status_polls += 1
             state = self.done_state if self._status_polls >= self.polls_until_done else "RUNNING"
-            return f"TURN,state={state},elapsed=100,r=300,target_deg=30.000,yaw=0.000"
+            return f"TURN,state={state},dir=RIGHT,elapsed=100,r_cm=30,target_deg=30,yaw=+0.000"
         return "OK"
 
     def readline(self) -> bytes:
@@ -104,21 +105,33 @@ def test_forward_straight_uses_straight_gocm(controller):
     assert not any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
 
 
-def test_forward_right_turn_uses_turn_start_with_positive_angle(controller):
+def test_forward_right_turn_uses_turn_right_with_positive_angle(controller):
+    # protocol v1.8: direction is the command name (TURN,RIGHT), A>0 = forward.
     controller._ser.sent.clear()
     controller.execute_command(Command("FORWARD", "RIGHT", 15, swept_angle_deg=30))
-    assert controller._ser.sent[0] == f"TURN,START,R={round(mc.TURNING_RADIUS_CM * 10)},A=30"
+    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.TURNING_RADIUS_CM)},A=30"
 
 
-def test_forward_left_turn_uses_turn_start_with_negative_angle(controller):
+def test_forward_left_turn_uses_turn_left_with_positive_angle(controller):
     controller._ser.sent.clear()
     controller.execute_command(Command("FORWARD", "LEFT", 15, swept_angle_deg=30))
-    assert controller._ser.sent[0] == f"TURN,START,R={round(mc.TURNING_RADIUS_CM * 10)},A=-30"
+    assert controller._ser.sent[0] == f"TURN,LEFT,R={round(mc.TURNING_RADIUS_CM)},A=30"
 
 
-def test_backward_command_falls_back_to_raw_motor(controller):
-    # STRAIGHT,GOCM/TURN,START are forward-only (see drive_control.h) -
-    # backward must go through raw MOTOR,B with negative PWM.
+def test_reverse_turn_now_also_uses_closed_loop_with_negative_angle(controller):
+    # protocol v1.8 added reverse support to TURN,LEFT/RIGHT directly - this
+    # used to fall back to raw MOTOR/STEER for any REVERSE command; now only
+    # REVERSE STRAIGHT still needs the fallback (see test below).
+    controller._ser.sent.clear()
+    controller.execute_command(Command("REVERSE", "RIGHT", 15, swept_angle_deg=30))
+    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.TURNING_RADIUS_CM)},A=-30"
+    assert not any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
+
+
+def test_reverse_straight_still_falls_back_to_raw_motor(controller):
+    # No reverse-capable equivalent of STRAIGHT,GOCM exists (protocol v1.8) -
+    # backward straight must still go through raw MOTOR,B with negative PWM.
+    # (Reverse TURN is different - see test above - v1.8 added that directly.)
     controller.execute_command(Command("REVERSE", "STRAIGHT", 20))
     motor_cmds = [c for c in controller._ser.sent if c.startswith("MOTOR,B,")]
     assert motor_cmds == [f"MOTOR,B,{-mc.RAW_DRIVE_PWM},{-mc.RAW_DRIVE_PWM}"]
@@ -133,9 +146,9 @@ def test_short_straight_segment_falls_back_to_raw(controller):
 
 
 def test_shallow_turn_falls_back_to_raw(controller):
-    # TURN,START only accepts |angle| >= 5deg.
+    # TURN,LEFT/RIGHT only accepts |angle| >= 5deg.
     controller.execute_command(Command("FORWARD", "LEFT", 2, swept_angle_deg=2))
-    assert not any(c.startswith("TURN,START,") for c in controller._ser.sent)
+    assert not any(c.startswith("TURN,LEFT,") or c.startswith("TURN,RIGHT,") for c in controller._ser.sent)
     assert any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
     assert any(c == f"STEER,US,{mc.RAW_STEER_LEFT_US}" for c in controller._ser.sent)
 
@@ -148,7 +161,7 @@ def test_execute_leg_runs_every_command_in_order(controller):
     controller._ser.sent.clear()
     controller.execute_leg(commands)
 
-    assert controller._ser.sent[0] == f"TURN,START,R={round(mc.TURNING_RADIUS_CM * 10)},A=30"
+    assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.TURNING_RADIUS_CM)},A=30"
     assert "STRAIGHT,GOCM,20" in controller._ser.sent
 
 
@@ -156,6 +169,17 @@ def test_straight_aborted_raises(controller):
     controller._ser.done_state = "ABORTED"
     with pytest.raises(mc.MotorControllerError, match="ABORTED"):
         controller.execute_command(Command("FORWARD", "STRAIGHT", 30))
+
+
+def test_turn_unrecognised_terminal_state_raises_immediately(controller):
+    # test_commands.c's TurnStateText also reports WRONG_SIGN/NO_TURN/
+    # BAD_CONFIG/NO_IMU - none of these are DONE/RUNNING/IDLE, so they must
+    # raise immediately rather than being silently polled until our own
+    # COMMAND_TIMEOUT_S (which _poll_until_done's "not in (RUNNING, IDLE)"
+    # check - not a hardcoded ABORTED/TIMEOUT list - is what guarantees).
+    controller._ser.done_state = "NO_TURN"
+    with pytest.raises(mc.MotorControllerError, match="NO_TURN"):
+        controller.execute_command(Command("FORWARD", "RIGHT", 15, swept_angle_deg=30))
 
 
 def test_turn_never_completing_times_out_and_stops(controller, monkeypatch):

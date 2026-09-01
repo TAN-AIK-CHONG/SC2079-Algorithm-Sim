@@ -3,45 +3,37 @@ Runs ON THE RPI - translates the drive commands produced by src/planner.py
 into the STM32 serial protocol. Called directly by main.py; there is no
 network/API step, everything runs in one process.
 
+Protocol v1.8 (2026-09-01): TURN is now TURN,LEFT/TURN,RIGHT,R=<cm>,A=<deg>
+(radius in cm, not mm; direction is the command name, not the sign of A)
+and supports reversing directly (A>0 forward, A<0 backward) - the old
+TURN,START,R=<mm>,A=<signed left/right> is gone, and so is the direction-
+sign bug that used to block reverse turns: each direction now has its own
+separately-calibrated servo endpoint (CMD_SERVO_LEFT_US/CMD_SERVO_RIGHT_US
+in turn_control.c) instead of one formula that ignored A's sign.
+
 Two execution paths, chosen per command in execute_command():
 
-  - FORWARD commands use the STM's own closed-loop routines: STRAIGHT,GOCM
-    for straight runs, TURN,START for turns. The STM handles PWM/servo/
-    gyro-correction internally - this file only starts the routine and
-    polls ...,STATUS until it reports DONE. No PWM/steering calibration
-    needed on our side for these; the STM team has already tuned them
-    (see drive_control.c: SERVO_CENTER_US=1712, BASE_PWM=2900 confirmed by
-    field testing in test_distance.c).
+  - Closed-loop, STM-side gyro/PWM correction, no calibration needed on our
+    side: STRAIGHT,GOCM for FORWARD straight runs, TURN,LEFT/TURN,RIGHT for
+    turns in EITHER direction (forward or reverse - see above). This file
+    only starts the routine and polls ...,STATUS until it reports DONE.
 
-  - Everything else falls back to the older raw MOTOR/STEER/ENC-polling
-    approach:
-      * BACKWARD (reverse) commands - neither STRAIGHT,GOCM nor TURN,START
-        takes a direction argument (see drive_control.h), so reversing is
-        only possible via raw MOTOR,B with negative PWM.
-      * Forward commands outside STRAIGHT,GOCM/TURN,START's supported
-        range - STRAIGHT,GOCM only accepts 10-500cm, TURN,START only
-        accepts |angle| >= 5deg (both enforced by the STM, see
-        drive_control.c's TURN_MIN_A_DEG / the STRAIGHT,GOCM bounds check
-        in test_uart.c) - short segments would otherwise be rejected
+  - Raw MOTOR/STEER/ENC-polling fallback, for what closed-loop still can't
+    do:
+      * REVERSE STRAIGHT - no reverse-capable equivalent of STRAIGHT,GOCM
+        exists yet.
+      * Commands outside STRAIGHT,GOCM/TURN,LEFT/RIGHT's supported ranges -
+        STRAIGHT,GOCM only accepts 10-500cm; TURN only accepts |angle| in
+        [5,360] and a radius at or above each direction's own calibrated
+        minimum (see turn_control.c) - anything smaller is rejected
         outright with ERR,BAD_VALUE.
     This path is NOT well calibrated: no file among the STM team's
-    calibration builds tests reversing at all, so RAW_DRIVE_PWM/
-    RAW_STEER_LEFT_US/RAW_STEER_RIGHT_US below are still guesses (the
-    steering values are the STM's own "starting point, not final
-    calibration" numbers from test_turn_calib.c).
-
-KNOWN FIRMWARE BUG - verify before trusting TURN,START for both directions:
-  As of mdp20260826afternoon_STRAIGHT_and_TURN.zip's drive_control.c,
-  Turn_Start()'s steering pulse is
-      delta_us = VEH_SERVO_TURN_SIGN * delta_deg / VEH_SERVO_DEG_PER_US
-  which never references the SIGN of the requested angle_deg, and
-  Drive_Step()'s turn phase compares |yaw| to |angle_deg| (magnitude
-  only). So today TURN,START steers the same physical direction no
-  matter what sign A is - it cannot yet actually turn both left and
-  right. Flag this to whoever owns drive_control.c; the fix is to also
-  multiply delta_us by the sign of the requested angle_deg. Until it's
-  fixed, only one turn direction from this function will work correctly
-  on the real robot.
+    calibration builds tests the raw MOTOR/STEER path in reverse, so
+    RAW_DRIVE_PWM/RAW_STEER_LEFT_US/RAW_STEER_RIGHT_US below are still
+    guesses (the steering values are test_turn_calib.c's own "starting
+    point, not final calibration" numbers). Also note STEER,US now has NO
+    software range clamp on the STM side (see PROTOCOL_en.md v1.8 SS3.5) -
+    an out-of-range value here goes straight to the servo.
 """
 
 from __future__ import annotations
@@ -147,9 +139,10 @@ class MotorController:
         self._send(f"STRAIGHT,GOCM,{cm}")
         self._poll_until_done("STRAIGHT,STATUS")
 
-    def _turn_arc(self, radius_cm: float, signed_degrees: int) -> None:
-        radius_mm = round(radius_cm * 10)
-        self._send(f"TURN,START,R={radius_mm},A={signed_degrees}")
+    def _turn_arc(self, turn: str, radius_cm: float, signed_degrees: int) -> None:
+        # turn is "LEFT" or "RIGHT" - the command name now, not the sign of A
+        # (protocol v1.8). R is cm directly; no mm conversion anymore.
+        self._send(f"TURN,{turn},R={round(radius_cm)},A={signed_degrees}")
         self._poll_until_done("TURN,STATUS")
 
     def _poll_until_done(self, status_command: str) -> None:
@@ -168,7 +161,13 @@ class MotorController:
             state = fields.get("state")
             if state == "DONE":
                 return
-            if state in ("ABORTED", "TIMEOUT"):
+            # Anything that isn't actively progressing is a failure - not
+            # just ABORTED/TIMEOUT. TURN,STATUS in particular can also
+            # report WRONG_SIGN/NO_TURN/BAD_CONFIG/NO_IMU (test_commands.c's
+            # TurnStateText); hardcoding only the two old names would leave
+            # us silently polling those until our own COMMAND_TIMEOUT_S
+            # instead of failing fast with the STM's actual reason.
+            if state not in ("RUNNING", "IDLE"):
                 raise MotorControllerError(f"{status_command} reported {state}: {fields}")
             if time.monotonic() > deadline:
                 self._send(mode_stop_command)
@@ -227,16 +226,23 @@ class MotorController:
         direction = command.direction
         turn = command.turn
 
-        if direction == "FORWARD" and turn == "STRAIGHT":
-            cm = round(command.distance_cm)
-            if STRAIGHT_MIN_CM <= cm <= STRAIGHT_MAX_CM:
-                self._drive_straight_cm(cm)
-                return
-        elif direction == "FORWARD":
+        if turn == "STRAIGHT":
+            if direction == "FORWARD":
+                cm = round(command.distance_cm)
+                if STRAIGHT_MIN_CM <= cm <= STRAIGHT_MAX_CM:
+                    self._drive_straight_cm(cm)
+                    return
+            # REVERSE STRAIGHT has no closed-loop equivalent yet - falls
+            # through to the raw fallback below.
+        else:
+            # TURN,LEFT/TURN,RIGHT now handle both directions (protocol
+            # v1.8) - A's sign selects forward/backward, turn selects the
+            # command name directly (already "LEFT"/"RIGHT", matching the
+            # STM's own tokens verbatim).
             degrees = round(command.swept_angle_deg)
             if degrees >= TURN_MIN_ANGLE_DEG:
-                signed_degrees = degrees if turn == "RIGHT" else -degrees
-                self._turn_arc(TURNING_RADIUS_CM, signed_degrees)
+                signed_degrees = degrees if direction == "FORWARD" else -degrees
+                self._turn_arc(turn, TURNING_RADIUS_CM, signed_degrees)
                 return
 
         self._execute_raw(command)
