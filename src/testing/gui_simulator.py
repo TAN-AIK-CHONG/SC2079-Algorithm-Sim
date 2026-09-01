@@ -5,7 +5,6 @@ Run from src/:
     python testing/gui_simulator.py
 """
 
-import math
 import queue
 import random
 import sys
@@ -23,7 +22,7 @@ from algorithms.graph import Graph
 from algorithms.hamiltonian import exhaustive_search, path_length
 from algorithms.hybrid_astar import hybrid_astar
 from collision import footprint_in_collision
-from planner import Command, _primitives_to_commands
+from planner import Command, _apply_command, _primitives_to_commands
 from model import (
     ARENA_LENGTH_CM,
     GRID_LENGTH_CM,
@@ -178,40 +177,16 @@ def generate_obstacles(count: int, rng: random.Random) -> list[Obstacle]:
 
 
 def _arc_poses(start: Robot, command: Command, step_cm: float) -> list[Robot]:
-    """Sample poses along a Command's true path: a straight line, or a true
-    circular arc at the radius implied by distance_cm/swept_angle_deg - not
-    hybrid_astar's per-step straight-chord-then-rotate approximation. This is
-    what the robot will actually drive, since Command is exactly what
-    planner.py hands to the STM32."""
-    direction = 1 if command.direction == "FORWARD" else -1
+    """Sample poses along a Command's true path via planner._apply_command -
+    a straight line, or a true circular arc at the radius implied by
+    distance_cm/swept_angle_deg, not hybrid_astar's per-step
+    chord-then-rotate approximation. This is what the robot will actually
+    drive, since Command is exactly what planner.py hands to the STM32."""
     n_samples = max(1, round(command.distance_cm / step_cm))
-
-    if command.turn == "STRAIGHT":
-        return [
-            Robot(
-                start.x_cm + direction * d * math.cos(start.theta_rad),
-                start.y_cm + direction * d * math.sin(start.theta_rad),
-                start.theta_rad,
-            )
-            for d in (command.distance_cm * i / n_samples for i in range(1, n_samples + 1))
-        ]
-
-    # Sign of the heading change: LEFT/RIGHT is the physical steering side
-    # (see _combine_arcs in planner.py), which only maps to a signed dtheta
-    # once direction is known - reversing flips it, matching hybrid_astar's
-    # own motion primitive convention.
-    side_sign = 1 if command.turn == "LEFT" else -1
-    dtheta_total = side_sign * direction * math.radians(command.swept_angle_deg)
-    curvature = dtheta_total / command.distance_cm  # signed, rad/cm
-
-    poses = []
-    for i in range(1, n_samples + 1):
-        u = command.distance_cm * i / n_samples
-        theta = start.theta_rad + curvature * u
-        x = start.x_cm + (direction / curvature) * (math.sin(theta) - math.sin(start.theta_rad))
-        y = start.y_cm - (direction / curvature) * (math.cos(theta) - math.cos(start.theta_rad))
-        poses.append(Robot(x, y, theta))
-    return poses
+    return [
+        _apply_command(start, command, command.distance_cm * i / n_samples)
+        for i in range(1, n_samples + 1)
+    ]
 
 
 def _leg_poses(start: Robot, commands: list[Command]) -> list[Robot]:
@@ -241,21 +216,27 @@ def plan_route(start: Robot, obstacles: list[Obstacle], emit) -> Plan:
     plan = Plan(order=order, node_robots=node_robots)
 
     current_id = order[0]  # "S"
+    current_pose = node_robots[current_id]  # updated to the actual pose reached after each leg
     for target_id in order[1:]:
-        result = hybrid_astar(node_robots[current_id], node_robots[target_id], footprints)
+        result = hybrid_astar(current_pose, node_robots[target_id], footprints)
         if result is None:
             plan.skipped_ids.append(target_id)
             emit(f"Leg {current_id} -> {target_id}: NO PATH FOUND, skipping obstacle {target_id}")
-            continue  # stay at current_id, try the next obstacle in the order instead
+            continue  # stay at current_id/current_pose, try the next obstacle in the order instead
 
         commands = _primitives_to_commands(result.primitives)
-        poses = _leg_poses(node_robots[current_id], commands)
+        poses = _leg_poses(current_pose, commands)
         plan.legs.append(Leg(target_id, poses, result.length))
         plan.length_cm += result.length
         emit(
             f"Leg {current_id} -> {target_id}: {result.length:.0f}cm over {len(commands)} commands"
         )
         current_id = target_id
+        # Not node_robots[target_id]: hybrid_astar only guarantees landing
+        # within its goal tolerance of the viewing pose, so the next leg
+        # must plan from where the robot will actually be - the same pose
+        # the drawn/animated trajectory for this leg ends on.
+        current_pose = poses[-1]
 
     return plan
 

@@ -85,6 +85,45 @@ def _primitives_to_commands(primitives: list[MotionPrimitive]) -> list[Command]:
     return commands
 
 
+def _apply_command(start: Robot, command: Command, distance_cm: float) -> Robot:
+    """Pose after driving `distance_cm` (up to the command's full
+    distance_cm) along the command's straight line or true circular arc -
+    the arc radius implied by distance_cm/swept_angle_deg, not
+    hybrid_astar's per-step chord approximation."""
+    direction = 1 if command.direction == "FORWARD" else -1
+
+    if command.turn == "STRAIGHT":
+        return Robot(
+            start.x_cm + direction * distance_cm * math.cos(start.theta_rad),
+            start.y_cm + direction * distance_cm * math.sin(start.theta_rad),
+            start.theta_rad,
+        )
+
+    # Sign of the heading change: LEFT/RIGHT is the physical steering side
+    # (see _combine_arcs above), which only maps to a signed dtheta once
+    # direction is known - reversing flips it, matching hybrid_astar's own
+    # motion primitive convention.
+    side_sign = 1 if command.turn == "LEFT" else -1
+    dtheta_total = side_sign * direction * math.radians(command.swept_angle_deg)
+    curvature = dtheta_total / command.distance_cm  # signed, rad/cm
+
+    theta = start.theta_rad + curvature * distance_cm
+    x = start.x_cm + (direction / curvature) * (math.sin(theta) - math.sin(start.theta_rad))
+    y = start.y_cm - (direction / curvature) * (math.cos(theta) - math.cos(start.theta_rad))
+    return Robot(x, y, theta)
+
+
+def _commands_end_pose(start: Robot, commands: list[Command]) -> Robot:
+    """Where the robot will actually be after driving every Command in
+    order - the pose the *next* leg should plan from, since it is not
+    generally the exact viewing pose (hybrid_astar only guarantees landing
+    within its goal tolerance of it)."""
+    pose = start
+    for command in commands:
+        pose = _apply_command(pose, command, command.distance_cm)
+    return pose
+
+
 def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     """Plan a mission visiting obstacles in the order exhaustive_search picks.
 
@@ -114,21 +153,21 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     legs: list[Leg] = []
     skipped_ids: list[int] = []
     current_id = order[0]  # "S"
+    current_pose = id_pose_map[current_id]  # updated to the actual pose reached after each leg
 
     for target_id in order[1:]:
-        result = hybrid_astar(id_pose_map[current_id], id_pose_map[target_id], footprints)
+        result = hybrid_astar(current_pose, id_pose_map[target_id], footprints)
         if result is None:
             skipped_ids.append(target_id)
-            continue  # stay at current_id, try the next obstacle in the order instead
+            continue  # stay at current_id/current_pose, try the next obstacle in the order instead
 
-        legs.append(
-            Leg(
-                from_id=current_id,
-                to_id=target_id,
-                commands=_primitives_to_commands(result.primitives),
-            )
-        )
+        commands = _primitives_to_commands(result.primitives)
+        legs.append(Leg(from_id=current_id, to_id=target_id, commands=commands))
         current_id = target_id
+        # Not id_pose_map[target_id]: hybrid_astar only guarantees landing
+        # within its goal tolerance of the viewing pose, so the next leg
+        # must plan from where the robot will actually be.
+        current_pose = _commands_end_pose(current_pose, commands)
 
     if not legs:
         raise PlanningError("no obstacle in the mission is reachable from the start")
