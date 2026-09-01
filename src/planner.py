@@ -52,7 +52,13 @@ def _combine_arcs(turning_primitives: list[MotionPrimitive]) -> Command:
     total_distance = sum(p.distance for p in turning_primitives)
     total_dtheta = sum(p.dtheta for p in turning_primitives)
     direction = "FORWARD" if turning_primitives[0].direction == 1 else "REVERSE"
-    turn = "LEFT" if total_dtheta > 0 else "RIGHT"
+    # Steering side, not dtheta's sign: reversing flips which sign of dtheta
+    # a given steering side produces (see hybrid_astar.py's
+    # _motion_primitives), so "left" only means the same physical side
+    # consistently if read from the primitive's own name - every primitive
+    # in this run shares one name (that's how _primitives_to_commands
+    # grouped them), so the first one is representative of the whole run.
+    turn = "LEFT" if "left" in turning_primitives[0].name else "RIGHT"
     return Command(
         direction=direction,
         turn=turn,

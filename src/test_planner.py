@@ -8,7 +8,7 @@ pytest test_planner.py (from inside src/).
 
 import planner
 import pytest
-from algorithms.hybrid_astar import HybridAstarResult
+from algorithms.hybrid_astar import HybridAstarResult, _motion_primitives
 from model import Direction, MotionPrimitive, Obstacle, Robot
 
 
@@ -94,3 +94,39 @@ def test_planning_error_only_when_nothing_at_all_is_reachable(monkeypatch):
     robot, obstacles = make_scenario(3)
     with pytest.raises(planner.PlanningError):
         planner.plan_mission(robot, obstacles)
+
+
+def _named(name: str) -> MotionPrimitive:
+    return next(p for p in _motion_primitives(10) if p.name == name)
+
+
+def test_combine_arcs_labels_by_steering_side_not_dtheta_sign():
+    """_combine_arcs must read LEFT/RIGHT off the primitive's own name, not
+    off dtheta's sign - reversing flips which dtheta sign a given steering
+    side produces (see test_hybrid_astar.py), so a run of "reverse_left"
+    primitives (steer=LEFT, dtheta<0) must still come out labelled LEFT."""
+    reverse_left_run = [_named("reverse_left")] * 3
+    command = planner._combine_arcs(reverse_left_run)
+    assert command.turn == "LEFT"
+    assert command.direction == "REVERSE"
+    assert _named("reverse_left").dtheta < 0  # sanity: dtheta really is negative here
+
+    reverse_right_run = [_named("reverse_right")] * 3
+    command = planner._combine_arcs(reverse_right_run)
+    assert command.turn == "RIGHT"
+    assert command.direction == "REVERSE"
+    assert _named("reverse_right").dtheta > 0  # sanity: dtheta really is positive here
+
+
+def test_combine_arcs_labels_forward_turns_correctly_too():
+    command = planner._combine_arcs([_named("forward_left")] * 2)
+    assert command.turn == "LEFT" and command.direction == "FORWARD"
+
+    command = planner._combine_arcs([_named("forward_right")] * 2)
+    assert command.turn == "RIGHT" and command.direction == "FORWARD"
+
+
+def test_combine_arcs_swept_angle_is_always_positive_magnitude():
+    for name in ("forward_left", "forward_right", "reverse_left", "reverse_right"):
+        command = planner._combine_arcs([_named(name)] * 4)
+        assert command.swept_angle_deg > 0, name

@@ -73,6 +73,10 @@ def run_all(graph: Graph) -> dict:
 
     optimal = results["exhaustive_search"]["length"]
     for name in results:
-        results[name]["accuracy"] = optimal / results[name]["length"]
+        # 0 obstacles -> every path is just ["S"], length 0 for all three -
+        # "how close to optimal" is trivially 1.0 (nothing to be worse at),
+        # not 0/0.
+        length = results[name]["length"]
+        results[name]["accuracy"] = (optimal / length) if length else 1.0
 
     return results

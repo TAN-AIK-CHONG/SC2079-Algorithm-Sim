@@ -71,7 +71,13 @@ class Robot:
         """
         The four corners of the robot's square footprint at this pose, in cm.
 
-        Returned anticlockwise from the bottom-left, the robot's own origin.
+        Returned clockwise (origin -> forward -> forward+right -> right),
+        starting from the robot's own origin. Nothing downstream cares about
+        winding direction (collision.py's SAT test only needs two adjacent
+        edges, in either sense) - this is purely a note for readers, since
+        Obstacle.footprint_corners_cm() below is genuinely anticlockwise
+        despite the similar-sounding docstring, and it's easy to assume the
+        two match.
         """
         forward_x, forward_y = math.cos(self.theta_rad), math.sin(self.theta_rad)
         right_x, right_y = forward_y, -forward_x

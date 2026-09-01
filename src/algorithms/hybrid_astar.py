@@ -63,15 +63,27 @@ def _normalize_angle(theta: float) -> float:
 
 
 def _motion_primitives(step: int) -> list[MotionPrimitive]:
-    """MotionPrimitive for each available action."""
+    """MotionPrimitive for each available action.
+
+    dtheta's sign is the TRUE resulting heading change, per the standard
+    bicycle-model kinematics: dtheta/dt = (v/L) * tan(steering angle).
+    Since v (signed velocity) multiplies in, reversing with the SAME
+    steering side flips the sign of the heading change relative to driving
+    forward with that side - the well-known "reversing swings the car the
+    opposite way" behaviour from parallel parking. So reverse_left (same
+    physical wheel angle as forward_left, only going backward) carries the
+    SAME dtheta sign as forward_right, not forward_left - and vice versa
+    for reverse_right. Getting this backward would make the search's
+    simulated heading rotate the wrong way on every reverse turn, which
+    then corrupts every pose chained after it in that leg."""
     dtheta = step / TURNING_RADIUS_CM
     return [
         MotionPrimitive("forward_straight", 1, 0.0, step),
         MotionPrimitive("forward_left", 1, dtheta, step),
         MotionPrimitive("forward_right", 1, -dtheta, step),
         MotionPrimitive("reverse_straight", -1, 0.0, step),
-        MotionPrimitive("reverse_left", -1, dtheta, step),
-        MotionPrimitive("reverse_right", -1, -dtheta, step),
+        MotionPrimitive("reverse_left", -1, -dtheta, step),
+        MotionPrimitive("reverse_right", -1, dtheta, step),
     ]
 
 
