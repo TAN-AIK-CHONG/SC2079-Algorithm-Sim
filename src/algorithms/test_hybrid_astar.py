@@ -14,36 +14,45 @@ anywhere else (e.g. the repo root) raises ModuleNotFoundError: No module
 named 'algorithms'.
 """
 
-from algorithms.hybrid_astar import _motion_primitives
+from algorithms.hybrid_astar import (
+    LEFT_TURNING_RADIUS_CM,
+    RIGHT_TURNING_RADIUS_CM,
+    _motion_primitives,
+)
 
 
 def _by_name(primitives, name):
     return next(p for p in primitives if p.name == name)
 
 
-def test_forward_left_and_reverse_right_share_dtheta_sign():
-    # Same physical steering side (left) produces opposite dtheta for
-    # forward vs reverse - so forward_left's sign matches reverse_RIGHT's,
-    # not reverse_left's.
+# NOTE: LEFT_TURNING_RADIUS_CM != RIGHT_TURNING_RADIUS_CM (each direction has
+# its own protocol-enforced minimum - see hybrid_astar.py), so forward_left's
+# dtheta MAGNITUDE no longer equals forward_right's - a left turn and a right
+# turn are now genuinely different arcs. The kinematic invariant this file
+# actually exists to guard - reversing with a given steering side flips the
+# sign of dtheta but not its magnitude, since forward and reverse on the same
+# side share that side's one radius - only ever held SAME-side (forward_left
+# vs reverse_left, forward_right vs reverse_right), never cross-side
+# (forward_left vs reverse_right used to look equal too, but only because
+# both radii happened to be equal at the time - that was always a
+# coincidence of the old shared-radius constant, not something this
+# invariant depends on).
+def test_forward_left_and_reverse_left_are_mirror_images():
     primitives = _motion_primitives(10)
     forward_left = _by_name(primitives, "forward_left")
     reverse_left = _by_name(primitives, "reverse_left")
-    reverse_right = _by_name(primitives, "reverse_right")
 
-    assert forward_left.dtheta > 0
-    assert reverse_left.dtheta < 0
-    assert reverse_right.dtheta > 0
-    assert forward_left.dtheta == reverse_right.dtheta
+    assert forward_left.dtheta == 10 / LEFT_TURNING_RADIUS_CM
     assert reverse_left.dtheta == -forward_left.dtheta
 
 
-def test_forward_right_and_reverse_left_share_dtheta_sign():
+def test_forward_right_and_reverse_right_are_mirror_images():
     primitives = _motion_primitives(10)
     forward_right = _by_name(primitives, "forward_right")
-    reverse_left = _by_name(primitives, "reverse_left")
+    reverse_right = _by_name(primitives, "reverse_right")
 
-    assert forward_right.dtheta < 0
-    assert forward_right.dtheta == reverse_left.dtheta
+    assert forward_right.dtheta == -10 / RIGHT_TURNING_RADIUS_CM
+    assert reverse_right.dtheta == -forward_right.dtheta
 
 
 def test_straight_primitives_have_zero_dtheta_both_directions():

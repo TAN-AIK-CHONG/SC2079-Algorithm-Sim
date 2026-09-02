@@ -21,7 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-from algorithms.hamiltonian import run_all
+from algorithms.hamiltonian import exhaustive_search
 from algorithms.graph import Graph
 from model import (
     ARENA_LENGTH_CM,
@@ -31,7 +31,12 @@ from model import (
     Direction,
     parse_scenario,
 )
-from testing.pathing import calculate_final_path
+from planner import Leg, PlanningError, _apply_command, plan_mission
+
+# Sample this often (cm of travel) along each Command's true arc/line for the
+# plotted path - matches hybrid_astar's own STEP_CM granularity closely
+# enough to look smooth without generating an excessive number of points.
+PATH_SAMPLE_STEP_CM = 2
 
 # Points in the direction the obstacle's image faces, drawn as an arrow off the obstacle cell.
 IMAGE_SIDE_OFFSET = {
@@ -48,18 +53,50 @@ def load_map(path: Path):
     return parse_scenario(data)
 
 
+def _mission_path(start, legs: list[Leg]):
+    """Every Command in every leg, sampled along its true straight line /
+    circular arc (via planner._apply_command - the exact geometry a Command
+    implies, not hybrid_astar's per-search-step chord approximation), so the
+    plotted line matches what the robot will actually be commanded to do."""
+    path = [start]
+    pose = start
+    for leg in legs:
+        for command in leg.commands:
+            # _apply_command's distance_cm is measured from THIS command's own
+            # start, not from the previous sample - command_start must stay
+            # fixed across every partial step, or distances compound.
+            command_start = pose
+            n_steps = max(1, round(command.distance_cm / PATH_SAMPLE_STEP_CM))
+            for step in range(1, n_steps + 1):
+                pose = _apply_command(command_start, command, command.distance_cm * step / n_steps)
+                path.append(pose)
+    return path
+
+
 def plan(robot, obstacles):
-    graph = Graph.build(robot, obstacles)
-    order = run_all(graph)["exhaustive_search"]["path"]
-    final_path, length_cm, completed_legs, skipped_legs = calculate_final_path(
-        graph, obstacles, order
-    )
-    return order, final_path, length_cm, completed_legs, skipped_legs
+    """Plan with planner.plan_mission() - the same function rpi/main.py
+    calls for the real run - instead of a second, hand-rolled leg-stitching
+    implementation, so what's rendered here can't silently drift from what
+    actually gets sent to the STM. (testing/pathing.py still exists and is
+    still used by generate_maps.py's reachability check - not touched here.)
+    """
+    order = exhaustive_search(Graph.build(robot, obstacles))
+
+    try:
+        mission = plan_mission(robot, obstacles)
+    except PlanningError:
+        # Nothing at all was reachable - mirror the old empty-path behaviour
+        # rather than letting this propagate and abort a whole --out batch.
+        return order, [], 0.0, 0, order[1:]
+
+    final_path = _mission_path(robot, mission.legs)
+    length_cm = sum(command.distance_cm for leg in mission.legs for command in leg.commands)
+    return order, final_path, float(length_cm), len(mission.legs), mission.skipped_ids
 
 
 def render(map_path: Path, out_path: Path):
     robot, obstacles = load_map(map_path)
-    order, final_path, length_cm, completed_legs, skipped_legs = plan(robot, obstacles)
+    order, final_path, length_cm, completed_legs, skipped_ids = plan(robot, obstacles)
 
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.set_xlim(0, ARENA_LENGTH_CM)
@@ -138,8 +175,8 @@ def render(map_path: Path, out_path: Path):
 
     status = (
         "complete"
-        if not skipped_legs
-        else f"skipped {len(skipped_legs)}: " + ", ".join(f"{a}->{b}" for a, b in skipped_legs)
+        if not skipped_ids
+        else f"skipped {len(skipped_ids)}: " + ", ".join(str(node_id) for node_id in skipped_ids)
     )
     ax.set_title(
         f"{map_path.stem}  |  {len(obstacles)} obstacles  |  "

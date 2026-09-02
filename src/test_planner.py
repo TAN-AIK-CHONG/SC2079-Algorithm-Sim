@@ -22,9 +22,11 @@ def make_scenario(num_obstacles: int) -> tuple[Robot, list[Obstacle]]:
 
 def fake_result() -> HybridAstarResult:
     """A minimal, valid-looking hybrid_astar success result - one straight
-    primitive is enough for _primitives_to_commands() to fold into a Command."""
+    primitive is enough for _primitives_to_commands() to fold into a Command.
+    path needs at least one pose: plan_mission() reads path[-1] as the real
+    chaining pose for the next leg (see plan_mission)."""
     primitive = MotionPrimitive("forward_straight", 1, 0.0, 10)
-    return HybridAstarResult(path=[], primitives=[primitive], length=10.0)
+    return HybridAstarResult(path=[Robot(0.0, 0.0, 0.0)], primitives=[primitive], length=10.0)
 
 
 def test_all_reachable_visits_every_obstacle_in_order(monkeypatch):

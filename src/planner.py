@@ -114,10 +114,12 @@ def _apply_command(start: Robot, command: Command, distance_cm: float) -> Robot:
 
 
 def _commands_end_pose(start: Robot, commands: list[Command]) -> Robot:
-    """Where the robot will actually be after driving every Command in
-    order - the pose the *next* leg should plan from, since it is not
-    generally the exact viewing pose (hybrid_astar only guarantees landing
-    within its goal tolerance of it)."""
+    """Where the robot will end up after driving every Command in order, via
+    each command's true straight line / circular arc - general-purpose
+    reconstruction for callers that only have Commands to work with (e.g.
+    testing/visualize_map.py, testing/gui_simulator.py). NOT used to chain
+    plan_mission()'s own legs - see plan_mission for why it uses
+    hybrid_astar's own validated result.path[-1] instead."""
     pose = start
     for command in commands:
         pose = _apply_command(pose, command, command.distance_cm)
@@ -164,10 +166,21 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
         commands = _primitives_to_commands(result.primitives)
         legs.append(Leg(from_id=current_id, to_id=target_id, commands=commands))
         current_id = target_id
-        # Not id_pose_map[target_id]: hybrid_astar only guarantees landing
-        # within its goal tolerance of the viewing pose, so the next leg
-        # must plan from where the robot will actually be.
-        current_pose = _commands_end_pose(current_pose, commands)
+        # result.path[-1], not id_pose_map[target_id] or a Command
+        # reconstruction: hybrid_astar only guarantees landing within its
+        # goal tolerance of the viewing pose, so the next leg must plan from
+        # where the robot will actually be - and result.path[-1] is the
+        # exact state hybrid_astar itself already validated as collision-free
+        # on the way to accepting this leg (every expansion step is checked
+        # via _segment_collision_free). Reconstructing that pose from this
+        # leg's rounded Commands instead (via _commands_end_pose) lands a
+        # hair off from the raw search state - usually harmless, but just
+        # enough, near a tight corner, to occasionally tip the reconstructed
+        # pose into collision. hybrid_astar() refuses to even start a search
+        # from a start pose already in collision, so that one bad
+        # reconstruction silently failed every leg after it for the rest of
+        # the mission, not just the one leg it actually affected.
+        current_pose = result.path[-1]
 
     if not legs:
         raise PlanningError("no obstacle in the mission is reachable from the start")
