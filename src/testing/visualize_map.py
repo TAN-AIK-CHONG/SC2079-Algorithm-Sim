@@ -77,9 +77,9 @@ def plan(robot, obstacles):
     """Plan with planner.plan_mission() - the same function rpi/main.py
     calls for the real run - instead of a second, hand-rolled leg-stitching
     implementation, so what's rendered here can't silently drift from what
-    actually gets sent to the STM. (testing/pathing.py still exists and is
-    still used by generate_maps.py's reachability check - not touched here.)
-    """
+    actually gets sent to the STM. generate_maps.py's reachability check
+    switched to plan_mission() too - testing/pathing.py has no callers left
+    (see its own docstring)."""
     order = exhaustive_search(Graph.build(robot, obstacles))
 
     try:

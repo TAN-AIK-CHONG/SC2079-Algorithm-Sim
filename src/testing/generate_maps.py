@@ -6,8 +6,6 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
-from algorithms.hamiltonian import run_all
-from algorithms.graph import Graph
 from collision import footprint_in_collision
 from model import (
     NUM_GRIDS,
@@ -15,7 +13,7 @@ from model import (
     Obstacle,
     Robot,
 )
-from testing.pathing import calculate_final_path
+from planner import PlanningError, plan_mission
 
 OUTPUT_DIR = ROOT_DIR / "testing" / "generated_maps"
 OBSTACLE_COUNTS = (4, 5, 6, 7, 8)
@@ -26,19 +24,22 @@ ROBOT_START = Robot.from_grid(*ROBOT_START_CELL)
 START_ZONE_CELLS = 4
 
 # Accept a random layout once at least this fraction of its obstacles are
-# reachable, rather than requiring every single one. At the real robot's
-# 30cm turning radius, demanding 100% reachability makes _generate_map()'s
-# retry loop take a very long time (most random layouts have at least one
-# obstacle hybrid_astar can't reach) - see calculate_final_path()'s
-# skip-and-continue behaviour, which this counts against.
+# reachable, rather than requiring every single one. Demanding 100% makes
+# _generate_map()'s retry loop take a very long time (most random layouts
+# have at least one obstacle hybrid_astar can't reach) - see
+# plan_mission()'s skip-and-continue behaviour, which this counts against.
 MIN_REACHABLE_FRACTION = 0.5
 
 
 def _meets_reachability_bar(robot: Robot, obstacles: list[Obstacle]) -> bool:
-    graph = Graph.build(robot, obstacles)
-    order = run_all(graph)["exhaustive_search"]["path"]
-    _, _, completed_legs, _ = calculate_final_path(graph, obstacles, order)
-    return completed_legs >= len(obstacles) * MIN_REACHABLE_FRACTION
+    # plan_mission() itself, not a separate reimplementation (see
+    # testing/pathing.py's history) - a map this accepts is only actually
+    # useful for testing if the real production planner can solve it too.
+    try:
+        mission = plan_mission(robot, obstacles)
+    except PlanningError:
+        return False
+    return len(mission.legs) >= len(obstacles) * MIN_REACHABLE_FRACTION
 
 
 def _viewing_pose_ok(obstacle: Obstacle, obstacles: list[Obstacle]) -> bool:
