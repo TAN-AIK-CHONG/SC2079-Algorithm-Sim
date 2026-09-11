@@ -7,29 +7,19 @@ from collision import footprint_in_collision
 from model import Corners, Robot, MotionPrimitive
 
 STEP_CM = 10
-SEGMENT_SAMPLES = 2
+SEGMENT_SAMPLES = 3
 NUM_HEADING_BUCKETS = 72
 POS_RESOLUTION_CM = 5
 REVERSE_COST_MULTIPLIER = 1
 LEFT_TURNING_RADIUS_CM = 20
 RIGHT_TURNING_RADIUS_CM = 35
 
-# Two-tier goal tolerance: try DEFAULT first, and only if that genuinely
-# finds nothing, retry once with LOOSE as a last resort.
-DEFAULT_GOAL_POS_TOLERANCE_CM = 7
-DEFAULT_GOAL_ANGLE_TOLERANCE_RAD = math.radians(10)
+DEFAULT_GOAL_POS_TOLERANCE_CM = 3
+DEFAULT_GOAL_ANGLE_TOLERANCE_RAD = math.radians(5)
 
-LOOSE_GOAL_POS_TOLERANCE_CM = 6
-LOOSE_GOAL_ANGLE_TOLERANCE_RAD = math.radians(14)
+LOOSE_GOAL_POS_TOLERANCE_CM = 5
+LOOSE_GOAL_ANGLE_TOLERANCE_RAD = math.radians(10)
 
-# Extra cost (in cm-equivalent) charged when a primitive's type differs from
-# the one immediately before it (e.g. forward_left -> forward_right). With
-# no penalty, alternating primitives cost exactly the same as a long run of
-# one type - the search has no reason to prefer either, so it can produce
-# stuttery FL/FR/FL/FR... paths where a real (if only approximately as
-# short) run would do. This biases A* toward committing to a maneuver
-# instead, without smoothing anything after the fact - every pose in the
-# result still maps to an exact primitive, so the command list stays exact
 TURN_CHANGE_PENALTY_CM = 5
 
 
@@ -61,24 +51,33 @@ class HybridAstarResult:
     length: float
 
 
+def _advance(
+    x: float, y: float, theta: float, primitive: MotionPrimitive, fraction: float = 1.0
+) -> tuple[float, float, float]:
+    new_theta = theta + primitive.dtheta * fraction
+    if primitive.dtheta == 0.0:
+        step = primitive.direction * primitive.distance * fraction
+        return x + step * math.cos(theta), y + step * math.sin(theta), new_theta
+
+    radius = primitive.direction * primitive.distance / primitive.dtheta
+    return (
+        x + radius * (math.sin(new_theta) - math.sin(theta)),
+        y - radius * (math.cos(new_theta) - math.cos(theta)),
+        new_theta,
+    )
+
+
 def _segment_collision_free(
-    start: Robot,
-    end: Robot,
+    x: float,
+    y: float,
+    theta: float,
+    primitive: MotionPrimitive,
     obstacles: list[Corners],
     samples: int = SEGMENT_SAMPLES,
 ) -> bool:
-    dx = end.x_cm - start.x_cm
-    dy = end.y_cm - start.y_cm
-    dtheta = end.theta_rad - start.theta_rad
-
     for i in range(samples + 1):
-        t = i / samples
-        sample = Robot(
-            start.x_cm + dx * t,
-            start.y_cm + dy * t,
-            start.theta_rad + dtheta * t,
-        )
-        if footprint_in_collision(sample, obstacles):
+        sample = _advance(x, y, theta, primitive, i / samples)
+        if footprint_in_collision(Robot(*sample), obstacles):
             return False
     return True
 
@@ -159,15 +158,10 @@ def _search(
         if reached_goal:
             return _reconstruct(came_from, start_state, key)
 
-        current = Robot(x, y, theta)
         for primitive in actions:
-            new_theta = theta + primitive.dtheta
-            new_x = x + primitive.direction * primitive.distance * math.cos(theta)
-            new_y = y + primitive.direction * primitive.distance * math.sin(theta)
+            new_x, new_y, new_theta = _advance(x, y, theta, primitive)
 
-            if not _segment_collision_free(
-                current, Robot(new_x, new_y, new_theta), obstacles
-            ):
+            if not _segment_collision_free(x, y, theta, primitive, obstacles):
                 continue
 
             step_cost = primitive.distance * (
@@ -203,10 +197,5 @@ def _reconstruct(came_from, start_state, goal_key) -> HybridAstarResult:
     path.append(Robot(*start_state))
     path.reverse()
     primitives.reverse()
-    # Real physical distance driven - NOT the search's internal g-score,
-    # which also carries TURN_CHANGE_PENALTY_CM (an artificial cost that
-    # biases the search toward smoother paths, not a real distance driven).
-    # Conflating the two would overstate reported/displayed path lengths by
-    # however many primitive-type transitions the path has.
     length = sum(p.distance for p in primitives)
     return HybridAstarResult(path=path, primitives=primitives, length=length)
