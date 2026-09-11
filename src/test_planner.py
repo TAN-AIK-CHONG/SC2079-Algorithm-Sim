@@ -98,6 +98,21 @@ def test_planning_error_only_when_nothing_at_all_is_reachable(monkeypatch):
         planner.plan_mission(robot, obstacles)
 
 
+def test_boundary_obstacle_facing_into_the_arena_is_planned_not_skipped():
+    """Real plan_mission (no mock): an obstacle jammed into the bottom-left
+    corner with its image facing into the arena. Its ideal viewing pose has
+    the robot footprint poking through a wall, so Graph.build nudges it to a
+    clear fallback (see graph._resolve_viewing_pose) - without that the leg's
+    goal would be in collision and the obstacle would be skipped."""
+    robot = Robot.from_grid(10, 10, Direction.NORTH)
+    obstacle = Obstacle(id=0, x_coord=0, y_coord=0, image_side=Direction.EAST)
+
+    plan = planner.plan_mission(robot, [obstacle])
+
+    assert plan.skipped_ids == []
+    assert [leg.to_id for leg in plan.legs] == [0]
+
+
 def _named(name: str) -> MotionPrimitive:
     return next(p for p in _motion_primitives(10) if p.name == name)
 

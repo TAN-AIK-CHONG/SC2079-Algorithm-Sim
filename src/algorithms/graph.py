@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from algorithms.dubins import dubins_length
+from collision import footprint_in_collision
 from model import Obstacle, Robot
 
 
@@ -10,6 +11,24 @@ class Node:
     viewing_pose: Robot  # where the robot stands at this node
 
 
+def _resolve_viewing_pose(obstacle: Obstacle, obstacle_footprints: list) -> Robot:
+    """The obstacle's ideal viewing pose if the robot can stand there
+    without overlapping another obstacle or leaving the arena, otherwise the
+    first fallback pose that's clear (see Obstacle.candidate_viewing_poses).
+
+    If every candidate is blocked, hands back the ideal pose anyway -
+    hybrid_astar then refuses it and plan_mission skips the obstacle,
+    exactly as it did before this resolution step existed. So this can only
+    rescue an obstacle that used to be skipped, never lose one that was
+    fine.
+    """
+    candidates = obstacle.candidate_viewing_poses()
+    for pose in candidates:
+        if not footprint_in_collision(pose, obstacle_footprints):
+            return pose
+    return candidates[0]
+
+
 @dataclass
 class Graph:
     nodes: list[Node]
@@ -17,10 +36,11 @@ class Graph:
 
     @classmethod
     def build(cls, start: Robot, obstacles: list[Obstacle]) -> "Graph":
-        nodes = [Node("S", start)]
+        obstacle_footprints = [obs.footprint_corners_cm() for obs in obstacles]
 
+        nodes = [Node("S", start)]
         for obs in obstacles:
-            nodes.append(Node(obs.id, obs.cm_viewing_position()))
+            nodes.append(Node(obs.id, _resolve_viewing_pose(obs, obstacle_footprints)))
 
         weights = {}
         for i, node_a in enumerate(nodes):

@@ -19,6 +19,25 @@ CAMERA_CLEARANCE_CELLS = CAMERA_CLEARANCE_LENGTH_CM // GRID_LENGTH_CM
 DEPTH_CLEARANCE_CELLS = ROBOT_FOOTPRINT_CELLS + CAMERA_CLEARANCE_CELLS
 ALIGNMENT_OFFSET_CELLS = (ROBOT_FOOTPRINT_CELLS - OBSTACLE_FOOTPRINT_CELLS) // 2
 
+# Fallback viewing-pose nudges (in grid cells), tried in order when an
+# obstacle's ideal viewing pose is blocked - a neighbouring obstacle sitting
+# in it, or the obstacle close enough to a wall that the ideal standoff puts
+# the robot out of bounds. (0, 0) is the ideal itself. Column 1 is toward
+# the obstacle: it eats into the 20cm camera clearance, capped at
+# CAMERA_CLEARANCE_CELLS - 1 so at least 10cm is kept and the robot
+# footprint never reaches the obstacle. Column 2 is sideways along the face:
+# the image drifts off-centre in frame, capped at 2 cells / 20cm. The
+# single step back (-1, 0) is a last resort for a neighbour clipping the
+# ideal pose from behind.
+VIEWING_POSE_OFFSET_CELLS = (
+    (0, 0),
+    (0, 1), (0, -1),
+    (1, 0),
+    (1, 1), (1, -1),
+    (0, 2), (0, -2),
+    (-1, 0),
+)
+
 Point = tuple[float, float]
 Corners = tuple[Point, Point, Point, Point]  # a footprint outline, walked in order
 
@@ -145,6 +164,25 @@ class Obstacle:
 
     def cm_viewing_position(self) -> Robot:
         return Robot.from_grid(*self.grid_viewing_position())
+
+    def candidate_viewing_poses(self) -> list[Robot]:
+        """cm_viewing_position() (the ideal) first, then fallback poses for
+        when it's blocked - see VIEWING_POSE_OFFSET_CELLS. Every candidate
+        keeps the ideal facing (the camera still has to point at the image);
+        only the standing position shifts. The caller walks these in order
+        and takes the first collision-free one (algorithms/graph.py's
+        _resolve_viewing_pose)."""
+        grid_x, grid_y, facing = self.grid_viewing_position()
+        toward_x, toward_y = facing.value  # unit vector from the robot toward the image
+        along_x, along_y = -toward_y, toward_x  # perpendicular, i.e. along the face
+        return [
+            Robot.from_grid(
+                grid_x + toward_x * toward + along_x * along,
+                grid_y + toward_y * toward + along_y * along,
+                facing,
+            )
+            for toward, along in VIEWING_POSE_OFFSET_CELLS
+        ]
 
 
 def parse_scenario(data: dict) -> tuple[Robot, list[Obstacle]]:

@@ -143,6 +143,12 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     remaining stops are visited in their original relative order, not
     necessarily the shortest order for what's left.
 
+    An obstacle whose ideal viewing pose is blocked - a neighbour sitting in
+    it, or the obstacle being close enough to a wall that the ideal standoff
+    is out of bounds - is retargeted to a nearby unobstructed pose before
+    being skipped (Graph.build via graph._resolve_viewing_pose); id_pose_map
+    below already carries that resolved pose.
+
     Raises PlanningError only if NOT ONE obstacle in the mission is
     reachable at all (nothing to drive).
     """
