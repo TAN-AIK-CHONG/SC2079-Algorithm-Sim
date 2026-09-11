@@ -41,14 +41,17 @@ PX_PER_CM = CELL_PX / GRID_LENGTH_CM
 CANVAS_PX = NUM_GRIDS * CELL_PX + 2 * MARGIN_PX
 
 # The 40cm x 40cm start area, and where the robot's own footprint sits inside it.
+# The cell is the footprint's BOTTOM-LEFT corner (see Robot.from_grid), so (0, 0)
+# parks the robot flush into the corner of the arena.
 START_ZONE_CELLS = 4
-ROBOT_START_CELL = (1, 1, Direction.NORTH)
+ROBOT_START_CELL = (0, 0, Direction.NORTH)
 
 MIN_OBSTACLES = 4
 MAX_OBSTACLES = 8
-# 4 cells between obstacle origins leaves a 30cm gap between their footprints -
-# exactly the robot's width, so every gap is a corridor it can actually drive.
-# Tighter than this and roughly half of all layouts have an unreachable obstacle.
+# 4 cells between obstacle origins leaves a 30cm gap between their TRUE
+# footprints - but obstacles are inflated by OBSTACLE_MARGIN_CM on every side
+# for collision, so the drivable corridor is really 20cm against a 19cm robot.
+# It fits, but only just; gaps this tight are rarely usable in practice.
 MIN_OBSTACLE_SEPARATION_CELLS = 4
 IMAGE_IDS = tuple(range(11, 41))  # the target IDs the camera can come back with
 
@@ -74,7 +77,9 @@ COLOURS = {
     "start_zone": "#dff0d8",
     "start_edge": "#4a9a4a",
     "obstacle": "#3c3c3c",
+    "obstacle_margin": "#b07070",
     "image_side": "#d64545",
+    "axle": "#123f66",
     "robot": "#4a90d9",
     "robot_front": "#f5a623",
     "pose": "#e08a00",
@@ -86,7 +91,7 @@ COLOURS = {
 
 
 def _footprint_centre_cm(robot: Robot) -> Point:
-    """The robot's pose is its rear-left corner; markers read better at the centre."""
+    """The robot's pose is its rear-axle midpoint; markers read better at the centre."""
     corners = robot.footprint_corners_cm()
     return (
         sum(x for x, _ in corners) / 4,
@@ -166,7 +171,7 @@ def generate_obstacles(count: int, rng: random.Random) -> list[Obstacle]:
         if len(obstacles) != count:
             continue
 
-        footprints = [obstacle.footprint_corners_cm() for obstacle in obstacles]
+        footprints = [obstacle.inflated_footprint_corners_cm() for obstacle in obstacles]
         if all(_viewing_pose_ok(obstacle, footprints) for obstacle in obstacles):
             return obstacles
 
@@ -212,7 +217,9 @@ def plan_route(start: Robot, obstacles: list[Obstacle], emit) -> Plan:
     )
 
     node_robots = {node.id: node.viewing_pose for node in graph.nodes}
-    footprints = [obstacle.footprint_corners_cm() for obstacle in obstacles]
+    # Inflated, not true: every collision check works against the safety outline
+    # (model.OBSTACLE_MARGIN_CM). The canvas still draws both.
+    footprints = [obstacle.inflated_footprint_corners_cm() for obstacle in obstacles]
     plan = Plan(order=order, node_robots=node_robots)
 
     current_id = order[0]  # "S"
@@ -272,7 +279,7 @@ class SimulatorApp:
         self._draw_robot()
         self._update_buttons()
         self._log(
-            "Ready. Robot parked at grid "
+            "Ready. Robot footprint's bottom-left at grid "
             f"({ROBOT_START_CELL[0]}, {ROBOT_START_CELL[1]}) facing "
             f"{ROBOT_START_CELL[2].name}."
         )
@@ -441,6 +448,16 @@ class SimulatorApp:
         size = OBSTACLE_FOOTPRINT_LENGTH_CM
 
         for obstacle in self.obstacles:
+            # The inflated outline first, so the true block sits on top of it.
+            # This washed-out square is what every collision check actually sees.
+            self.canvas.create_polygon(
+                self._polygon_px(obstacle.inflated_footprint_corners_cm()),
+                fill=COLOURS["obstacle_margin"],
+                stipple="gray25",
+                outline=COLOURS["obstacle_margin"],
+                dash=(3, 3),
+                tags="obstacle",
+            )
             corners = obstacle.footprint_corners_cm()
             self.canvas.create_polygon(
                 self._polygon_px(corners),
@@ -497,8 +514,9 @@ class SimulatorApp:
             return
 
         for leg in self.plan.legs:
-            # The planner's poses are the footprint's bottom-left corner, so that
-            # is what the planned path traces - not the robot's centre.
+            # The planner's poses are the robot's REAR-AXLE MIDPOINT, so that is
+            # what the planned path traces - not the robot's centre. It is the
+            # only point whose motion hybrid_astar actually models.
             points = [
                 value
                 for pose in leg.poses
@@ -557,7 +575,7 @@ class SimulatorApp:
         self.canvas.delete("robot")
         corners = self.robot.footprint_corners_cm()
 
-        # Full 30cm x 30cm footprint...
+        # The robot's true footprint, ROBOT_LENGTH_CM x ROBOT_WIDTH_CM...
         self.canvas.create_polygon(
             self._polygon_px(corners),
             fill=COLOURS["robot"],
@@ -575,33 +593,36 @@ class SimulatorApp:
             width=4,
             tags="robot",
         )
-        # The pose the planner actually tracks, so it is visibly on the path.
-        pose_x_px, pose_y_px = self._to_px(self.robot.x_cm, self.robot.y_cm)
-        self.canvas.create_oval(
-            pose_x_px - 3,
-            pose_y_px - 3,
-            pose_x_px + 3,
-            pose_y_px + 3,
-            fill=COLOURS["robot"],
-            outline="",
-            tags="robot",
-        )
-        centre = _footprint_centre_cm(self.robot)
+        # Axle -> nose, so the arrow gives the heading AND shows where in the
+        # body the tracked point actually sits.
         front_mid = (
             (front_left[0] + front_right[0]) / 2,
             (front_left[1] + front_right[1]) / 2,
         )
+        axle_x_px, axle_y_px = self._to_px(self.robot.x_cm, self.robot.y_cm)
         self.canvas.create_line(
-            *self._to_px(*centre),
+            axle_x_px,
+            axle_y_px,
             *self._to_px(*front_mid),
             fill=COLOURS["robot_front"],
             width=2,
             arrow=tk.LAST,
             tags="robot",
         )
+        # The rear-axle midpoint itself, drawn last so it stays visible: this is
+        # the pose hybrid_astar propagates, and what the path and trail trace.
+        self.canvas.create_oval(
+            axle_x_px - 4,
+            axle_y_px - 4,
+            axle_x_px + 4,
+            axle_y_px + 4,
+            fill=COLOURS["axle"],
+            outline="white",
+            tags="robot",
+        )
 
     def _extend_trail(self) -> None:
-        # Same point the planned path traces: the footprint's bottom-left corner.
+        # Same point the planned path traces: the robot's rear-axle midpoint.
         self.trail_px.extend(self._to_px(self.robot.x_cm, self.robot.y_cm))
         if len(self.trail_px) < 4:
             return
@@ -638,11 +659,12 @@ class SimulatorApp:
         self.status_var.set(f"{count} obstacles placed. Plan a path next.")
         self._log(f"Generated {count} obstacles:")
         for obstacle in self.obstacles:
-            x, y, facing = obstacle.grid_viewing_position()
+            pose = obstacle.cm_viewing_position()
             self._log(
                 f"  #{obstacle.id} at ({obstacle.x_coord}, {obstacle.y_coord}), "
                 f"image faces {obstacle.image_side.name}, "
-                f"viewing pose ({x}, {y}) facing {facing.name}"
+                f"viewing axle ({pose.x_cm:.0f}, {pose.y_cm:.0f})cm "
+                f"facing {obstacle.image_side.opposite.name}"
             )
 
     def on_plan(self) -> None:
@@ -743,10 +765,11 @@ class SimulatorApp:
         if obstacle is None:
             return
 
-        x, y, facing = obstacle.grid_viewing_position()
+        pose = obstacle.cm_viewing_position()
         self._log(
-            f"Obstacle {obstacle.id}: reached viewing pose ({x}, {y}) "
-            f"facing {facing.name} after {leg.length_cm:.0f}cm"
+            f"Obstacle {obstacle.id}: reached viewing pose "
+            f"({pose.x_cm:.0f}, {pose.y_cm:.0f})cm facing "
+            f"{obstacle.image_side.opposite.name} after {leg.length_cm:.0f}cm"
         )
         self._log(
             f"Obstacle {obstacle.id}: image recognised -> ID {self.image_ids[obstacle.id]}"

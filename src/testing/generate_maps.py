@@ -45,7 +45,7 @@ def _meets_reachability_bar(robot: Robot, obstacles: list[Obstacle]) -> bool:
 def _viewing_pose_ok(obstacle: Obstacle, obstacles: list[Obstacle]) -> bool:
     return not footprint_in_collision(
         obstacle.cm_viewing_position(),
-        [other.footprint_corners_cm() for other in obstacles],
+        [other.inflated_footprint_corners_cm() for other in obstacles],
     )
 
 
