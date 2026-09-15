@@ -231,7 +231,7 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     order = exhaustive_search(graph)
 
     id_pose_map = {node.id: node.viewing_pose for node in graph.nodes}
-    footprints = [obstacle.footprint_corners_cm() for obstacle in obstacles]
+    footprints = [obstacle.inflated_footprint_corners_cm() for obstacle in obstacles]
 
     legs: list[Leg] = []
     skipped_ids: list[int] = []

@@ -4,38 +4,36 @@ from enum import Enum
 from typing import Literal
 
 ARENA_LENGTH_CM = 200
-ROBOT_FOOTPRINT_LENGTH_CM = 30
+ROBOT_LENGTH_CM = 23
+ROBOT_WIDTH_CM = 19
+
 OBSTACLE_FOOTPRINT_LENGTH_CM = 10
+OBSTACLE_MARGIN_CM = 5
 CAMERA_CLEARANCE_LENGTH_CM = 20
 
 NUM_GRIDS = 20
 GRID_LENGTH_CM = ARENA_LENGTH_CM // NUM_GRIDS
-
-ROBOT_FOOTPRINT_CELLS = ROBOT_FOOTPRINT_LENGTH_CM // GRID_LENGTH_CM
 OBSTACLE_FOOTPRINT_CELLS = OBSTACLE_FOOTPRINT_LENGTH_CM // GRID_LENGTH_CM
 
-CAMERA_CLEARANCE_CELLS = CAMERA_CLEARANCE_LENGTH_CM // GRID_LENGTH_CM
-
-DEPTH_CLEARANCE_CELLS = ROBOT_FOOTPRINT_CELLS + CAMERA_CLEARANCE_CELLS
-ALIGNMENT_OFFSET_CELLS = (ROBOT_FOOTPRINT_CELLS - OBSTACLE_FOOTPRINT_CELLS) // 2
-
-# Fallback viewing-pose nudges (in grid cells), tried in order when an
-# obstacle's ideal viewing pose is blocked - a neighbouring obstacle sitting
-# in it, or the obstacle close enough to a wall that the ideal standoff puts
-# the robot out of bounds. (0, 0) is the ideal itself. Column 1 is toward
-# the obstacle: it eats into the 20cm camera clearance, capped at
-# CAMERA_CLEARANCE_CELLS - 1 so at least 10cm is kept and the robot
-# footprint never reaches the obstacle. Column 2 is sideways along the face:
-# the image drifts off-centre in frame, capped at 2 cells / 20cm. The
-# single step back (-1, 0) is a last resort for a neighbour clipping the
-# ideal pose from behind.
-VIEWING_POSE_OFFSET_CELLS = (
+# Fallback viewing-pose nudges (in cm), tried in order when an obstacle's
+# ideal viewing pose is blocked - a neighbouring obstacle sitting in it, or
+# the obstacle close enough to a wall that the ideal standoff puts the robot
+# out of bounds. (0, 0) is the ideal itself. Column 1 is toward the
+# obstacle: it eats into the 20cm camera clearance, capped at 10cm so at
+# least half of CAMERA_CLEARANCE_LENGTH_CM is kept and the robot's nose
+# never reaches the obstacle (see Obstacle.cm_viewing_position - the
+# standoff already accounts for ROBOT_LENGTH_CM, so shifting the rear-axle
+# pose toward the obstacle by X directly removes X of nose clearance).
+# Column 2 is sideways along the face: the image drifts off-centre in
+# frame, capped at 20cm. The single step back (-10, 0) is a last resort for
+# a neighbour clipping the ideal pose from behind.
+VIEWING_POSE_OFFSET_CM = (
     (0, 0),
-    (0, 1), (0, -1),
-    (1, 0),
-    (1, 1), (1, -1),
-    (0, 2), (0, -2),
-    (-1, 0),
+    (0, 10), (0, -10),
+    (10, 0),
+    (10, 10), (10, -10),
+    (0, 20), (0, -20),
+    (-10, 0),
 )
 
 Point = tuple[float, float]
@@ -56,6 +54,11 @@ class Direction(Enum):
         dx, dy = self.value
         return math.atan2(dy, dx)
 
+    @property
+    def opposite(self) -> "Direction":
+        dx, dy = self.value
+        return Direction((-dx, -dy))
+
 
 @dataclass
 class MotionPrimitive:
@@ -74,41 +77,41 @@ class MotionPrimitive:
 
 @dataclass(frozen=True)
 class Robot:
-    x_cm: float
-    y_cm: float
+    x_cm: float  # rear-axle midpoint
+    y_cm: float  # rear-axle midpoint
     theta_rad: float
 
     @classmethod
     def from_grid(cls, x_coord: int, y_coord: int, facing: Direction) -> "Robot":
+        """Builds Robot starting position from grid coordinates"""
+        corners = cls(0.0, 0.0, facing.theta_rad).footprint_corners_cm()
         return cls(
-            x_coord * GRID_LENGTH_CM,
-            y_coord * GRID_LENGTH_CM,
+            x_coord * GRID_LENGTH_CM - min(cx for cx, _ in corners),
+            y_coord * GRID_LENGTH_CM - min(cy for _, cy in corners),
             facing.theta_rad,
         )
 
     def footprint_corners_cm(self) -> Corners:
         """
-        The four corners of the robot's square footprint at this pose, in cm.
+        The four corners of the robot's footprint at this pose, in cm.
 
-        Returned clockwise (origin -> forward -> forward+right -> right),
-        starting from the robot's own origin. Nothing downstream cares about
-        winding direction (collision.py's SAT test only needs two adjacent
-        edges, in either sense) - this is purely a note for readers, since
-        Obstacle.footprint_corners_cm() below is genuinely anticlockwise
-        despite the similar-sounding docstring, and it's easy to assume the
-        two match.
+        Returned clockwise, starting from left-rear wheel.
         """
         forward_x, forward_y = math.cos(self.theta_rad), math.sin(self.theta_rad)
         right_x, right_y = forward_y, -forward_x
-        side = ROBOT_FOOTPRINT_LENGTH_CM
+        half = ROBOT_WIDTH_CM / 2
+
+        def corner(along: float, across: float) -> Point:
+            return (
+                self.x_cm + along * forward_x + across * right_x,
+                self.y_cm + along * forward_y + across * right_y,
+            )
+
         return (
-            (self.x_cm, self.y_cm),
-            (self.x_cm + side * forward_x, self.y_cm + side * forward_y),
-            (
-                self.x_cm + side * (forward_x + right_x),
-                self.y_cm + side * (forward_y + right_y),
-            ),
-            (self.x_cm + side * right_x, self.y_cm + side * right_y),
+            corner(0.0, -half),
+            corner(ROBOT_LENGTH_CM, -half),
+            corner(ROBOT_LENGTH_CM, half),
+            corner(0.0, half),
         )
 
 
@@ -119,16 +122,17 @@ class Obstacle:
     y_coord: int
     image_side: Direction
 
-    def footprint_corners_cm(self) -> Corners:
+    def footprint_corners_cm(self, margin_cm: float = 0.0) -> Corners:
         """
-        The four corners of the obstacle's square footprint, in cm.
+        The four corners of the obstacle's square footprint, in cm, grown by
+        `margin_cm` on every side.
 
         Returned anticlockwise from the bottom-left, the cell's own origin.
         """
-        min_x = self.x_coord * GRID_LENGTH_CM
-        min_y = self.y_coord * GRID_LENGTH_CM
-        max_x = min_x + OBSTACLE_FOOTPRINT_LENGTH_CM
-        max_y = min_y + OBSTACLE_FOOTPRINT_LENGTH_CM
+        min_x = self.x_coord * GRID_LENGTH_CM - margin_cm
+        min_y = self.y_coord * GRID_LENGTH_CM - margin_cm
+        max_x = min_x + OBSTACLE_FOOTPRINT_LENGTH_CM + 2 * margin_cm
+        max_y = min_y + OBSTACLE_FOOTPRINT_LENGTH_CM + 2 * margin_cm
         return (
             (min_x, min_y),
             (max_x, min_y),
@@ -136,52 +140,49 @@ class Obstacle:
             (min_x, max_y),
         )
 
-    def grid_viewing_position(self) -> tuple[int, int, Direction]:
-        if self.image_side is Direction.SOUTH:
-            return (
-                self.x_coord - ALIGNMENT_OFFSET_CELLS,
-                self.y_coord - DEPTH_CLEARANCE_CELLS,
-                Direction.NORTH,
-            )
-        elif self.image_side is Direction.NORTH:
-            return (
-                self.x_coord + ALIGNMENT_OFFSET_CELLS + OBSTACLE_FOOTPRINT_CELLS,
-                self.y_coord + OBSTACLE_FOOTPRINT_CELLS + DEPTH_CLEARANCE_CELLS,
-                Direction.SOUTH,
-            )
-        elif self.image_side is Direction.WEST:
-            return (
-                self.x_coord - DEPTH_CLEARANCE_CELLS,
-                self.y_coord + ALIGNMENT_OFFSET_CELLS + OBSTACLE_FOOTPRINT_CELLS,
-                Direction.EAST,
-            )
-        else:
-            return (
-                self.x_coord + OBSTACLE_FOOTPRINT_CELLS + DEPTH_CLEARANCE_CELLS,
-                self.y_coord - ALIGNMENT_OFFSET_CELLS,
-                Direction.WEST,
-            )
+    def inflated_footprint_corners_cm(self) -> Corners:
+        return self.footprint_corners_cm(OBSTACLE_MARGIN_CM)
+
+    def centre_cm(self) -> Point:
+        half = OBSTACLE_FOOTPRINT_LENGTH_CM / 2
+        return (
+            self.x_coord * GRID_LENGTH_CM + half,
+            self.y_coord * GRID_LENGTH_CM + half,
+        )
 
     def cm_viewing_position(self) -> Robot:
-        return Robot.from_grid(*self.grid_viewing_position())
+        dx, dy = self.image_side.value
+        standoff = (
+            OBSTACLE_FOOTPRINT_LENGTH_CM / 2
+            + CAMERA_CLEARANCE_LENGTH_CM
+            + ROBOT_LENGTH_CM
+        )
+        centre_x, centre_y = self.centre_cm()
+        return Robot(
+            centre_x + dx * standoff,
+            centre_y + dy * standoff,
+            self.image_side.opposite.theta_rad,  # look back at the image face
+        )
 
     def candidate_viewing_poses(self) -> list[Robot]:
         """cm_viewing_position() (the ideal) first, then fallback poses for
-        when it's blocked - see VIEWING_POSE_OFFSET_CELLS. Every candidate
+        when it's blocked - see VIEWING_POSE_OFFSET_CM. Every candidate
         keeps the ideal facing (the camera still has to point at the image);
         only the standing position shifts. The caller walks these in order
         and takes the first collision-free one (algorithms/graph.py's
         _resolve_viewing_pose)."""
-        grid_x, grid_y, facing = self.grid_viewing_position()
-        toward_x, toward_y = facing.value  # unit vector from the robot toward the image
+        ideal = self.cm_viewing_position()
+        # ideal.theta_rad is the robot's own facing, which points back at the
+        # obstacle (see cm_viewing_position) - so this IS "toward the image".
+        toward_x, toward_y = math.cos(ideal.theta_rad), math.sin(ideal.theta_rad)
         along_x, along_y = -toward_y, toward_x  # perpendicular, i.e. along the face
         return [
-            Robot.from_grid(
-                grid_x + toward_x * toward + along_x * along,
-                grid_y + toward_y * toward + along_y * along,
-                facing,
+            Robot(
+                ideal.x_cm + toward_x * toward + along_x * along,
+                ideal.y_cm + toward_y * toward + along_y * along,
+                ideal.theta_rad,
             )
-            for toward, along in VIEWING_POSE_OFFSET_CELLS
+            for toward, along in VIEWING_POSE_OFFSET_CM
         ]
 
 
