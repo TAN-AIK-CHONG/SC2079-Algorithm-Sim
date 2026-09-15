@@ -22,7 +22,12 @@ START = Robot.from_grid(0, 0, Direction.NORTH)
 
 
 def _footprints(*obstacles):
-    return [obs.footprint_corners_cm() for obs in obstacles]
+    """Inflated, matching what Graph.build actually checks candidates
+    against internally (see graph.py) - using the plain footprint here
+    would test this module against a smaller margin than production really
+    enforces, which could pass by coincidence rather than by matching
+    reality."""
+    return [obs.inflated_footprint_corners_cm() for obs in obstacles]
 
 
 @pytest.mark.parametrize("image_side", list(Direction))
@@ -74,8 +79,8 @@ def test_resolve_falls_back_to_the_ideal_when_every_candidate_is_blocked():
 # --- obstacle sitting on the arena boundary, image facing INTO the arena ---
 # (the common real case: obstacle pushed against a wall, photo taken from the
 # open side). The ideal standoff is well clear of that wall; resolution only
-# has to step in when the robot's own 30cm-wide footprint clips a
-# PERPENDICULAR wall - i.e. near a corner.
+# has to step in when the robot's own footprint (ROBOT_LENGTH_CM x
+# ROBOT_WIDTH_CM) clips a PERPENDICULAR wall - i.e. near a corner.
 
 @pytest.mark.parametrize(
     "grid_x, grid_y, image_side",
