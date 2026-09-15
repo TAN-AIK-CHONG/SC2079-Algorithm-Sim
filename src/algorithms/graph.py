@@ -36,7 +36,12 @@ class Graph:
 
     @classmethod
     def build(cls, start: Robot, obstacles: list[Obstacle]) -> "Graph":
-        obstacle_footprints = [obs.footprint_corners_cm() for obs in obstacles]
+        # Inflated, matching planner.py's own footprints list - a viewing
+        # pose this resolves as "clear" must be clear by the same margin
+        # hybrid_astar itself enforces, or a pose _resolve_viewing_pose
+        # accepts here could still be inside OBSTACLE_MARGIN_CM and get
+        # rejected as "goal in collision" the moment hybrid_astar checks it.
+        obstacle_footprints = [obs.inflated_footprint_corners_cm() for obs in obstacles]
 
         nodes = [Node("S", start)]
         for obs in obstacles:
