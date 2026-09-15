@@ -119,31 +119,69 @@ def test_forward_left_turn_uses_turn_left_with_positive_angle(controller):
     assert controller._ser.sent[0] == f"TURN,LEFT,R={round(mc.LEFT_TURNING_RADIUS_CM)},A=30"
 
 
-def test_reverse_turn_now_also_uses_closed_loop_with_negative_angle(controller):
-    # protocol v1.8 added reverse support to TURN,LEFT/RIGHT directly - this
-    # used to fall back to raw MOTOR/STEER for any REVERSE command; now only
-    # REVERSE STRAIGHT still needs the fallback (see test below).
+def test_reverse_turn_uses_closed_loop_with_negative_angle(controller):
+    # protocol v1.8 added reverse support to TURN,LEFT/RIGHT directly.
     controller._ser.sent.clear()
     controller.execute_command(Command("REVERSE", "RIGHT", 15, swept_angle_deg=30))
     assert controller._ser.sent[0] == f"TURN,RIGHT,R={round(mc.RIGHT_TURNING_RADIUS_CM)},A=-30"
     assert not any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
 
 
-def test_reverse_straight_still_falls_back_to_raw_motor(controller):
-    # No reverse-capable equivalent of STRAIGHT,GOCM exists (protocol v1.8) -
-    # backward straight must still go through raw MOTOR,B with negative PWM.
-    # (Reverse TURN is different - see test above - v1.8 added that directly.)
+def test_reverse_straight_in_range_uses_straight_gocm_with_negative_cm(controller):
+    # STRAIGHT,GOCM's cm is signed (straight_control.c's Straight_StartCm:
+    # sc_dir = (target_cm < 0) ? -1 : 1) - REVERSE goes through the same
+    # closed-loop command as FORWARD, just negated. No raw fallback needed
+    # for a reverse straight that's otherwise in GOCM's range.
+    controller._ser.sent.clear()
     controller.execute_command(Command("REVERSE", "STRAIGHT", 20))
+    assert controller._ser.sent[0] == "STRAIGHT,GOCM,-20"
+    assert not any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
+
+
+def test_reverse_straight_out_of_gocm_range_still_falls_back_to_raw_motor(controller):
+    controller.execute_command(Command("REVERSE", "STRAIGHT", 250))
     motor_cmds = [c for c in controller._ser.sent if c.startswith("MOTOR,B,")]
     assert motor_cmds == [f"MOTOR,B,{-mc.RAW_DRIVE_PWM},{-mc.RAW_DRIVE_PWM}"]
     assert controller._ser.sent[-1] == "STOP"
 
 
 def test_short_straight_segment_falls_back_to_raw(controller):
-    # STRAIGHT,GOCM only accepts 10-500cm; below that it would be rejected.
+    # STRAIGHT,GOCM only accepts magnitude 10-200cm; below that it would be rejected.
     controller.execute_command(Command("FORWARD", "STRAIGHT", 4))
     assert not any(c.startswith("STRAIGHT,GOCM,") for c in controller._ser.sent)
     assert any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
+
+
+def test_long_straight_segment_falls_back_to_raw(controller):
+    # straight_control.c's MAX_COMMAND_DISTANCE_CM is 200, not the old 500 -
+    # above that it would be rejected too.
+    controller.execute_command(Command("FORWARD", "STRAIGHT", 250))
+    assert not any(c.startswith("STRAIGHT,GOCM,") for c in controller._ser.sent)
+    assert any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
+
+
+def test_raw_straight_fallback_centers_steering_via_steer_center(controller):
+    # STEER,CENTER rather than a hardcoded STEER,US value, so this can't
+    # drift out of sync with the STM's own tuned SERVO_CENTER_US.
+    controller._ser.sent.clear()
+    controller.execute_command(Command("FORWARD", "STRAIGHT", 250))
+    assert controller._ser.sent[0] == "STEER,CENTER"
+
+
+def test_raw_straight_fallback_uses_raw_drive_pwm(controller):
+    # matches straight_tuning.h's LONG_BASE_PWM - the only case that still
+    # reaches raw fallback for STRAIGHT is an out-of-GOCM-range distance.
+    controller.execute_command(Command("FORWARD", "STRAIGHT", 250))
+    assert f"MOTOR,B,{mc.RAW_DRIVE_PWM},{mc.RAW_DRIVE_PWM}" in controller._ser.sent
+
+
+def test_raw_turn_fallback_uses_raw_turn_pwm_not_raw_drive_pwm(controller):
+    # matches turn_tuning.h's TURN_SLOW_PWM - the PWM the firmware's own
+    # closed-loop turn uses (no kickstart) for angles this shallow. Must be
+    # RAW_TURN_PWM, not RAW_DRIVE_PWM (they're deliberately different).
+    assert mc.RAW_TURN_PWM != mc.RAW_DRIVE_PWM
+    controller.execute_command(Command("FORWARD", "LEFT", 2, swept_angle_deg=2))
+    assert f"MOTOR,B,{mc.RAW_TURN_PWM},{mc.RAW_TURN_PWM}" in controller._ser.sent
 
 
 def test_shallow_turn_falls_back_to_raw(controller):
@@ -152,6 +190,13 @@ def test_shallow_turn_falls_back_to_raw(controller):
     assert not any(c.startswith("TURN,LEFT,") or c.startswith("TURN,RIGHT,") for c in controller._ser.sent)
     assert any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
     assert any(c == f"STEER,US,{mc.RAW_STEER_LEFT_US}" for c in controller._ser.sent)
+
+
+def test_turn_angle_over_360_falls_back_to_raw(controller):
+    # turn_tuning.h's CMD_MAX_ANGLE_DEG is 360; above that it would be rejected.
+    controller.execute_command(Command("FORWARD", "LEFT", 100, swept_angle_deg=370))
+    assert not any(c.startswith("TURN,LEFT,") or c.startswith("TURN,RIGHT,") for c in controller._ser.sent)
+    assert any(c.startswith("MOTOR,B,") for c in controller._ser.sent)
 
 
 def test_left_and_right_turns_use_different_planned_radii(controller):
@@ -215,7 +260,10 @@ def test_raw_command_times_out_if_target_never_reached(controller, monkeypatch):
     monkeypatch.setattr(mc, "POLL_INTERVAL_S", 0.01)
     controller._ser._cm_per_poll = 0.0  # simulate a stuck/stalled robot
 
+    # 250cm is outside STRAIGHT,GOCM's range so this still exercises the raw
+    # fallback's own timeout - a reverse straight within range (see above)
+    # would go through the closed-loop path instead.
     with pytest.raises(mc.MotorControllerError, match="did not reach"):
-        controller.execute_command(Command("REVERSE", "STRAIGHT", 100))
+        controller.execute_command(Command("REVERSE", "STRAIGHT", 250))
 
     assert controller._ser.sent[-1] == "STOP"

@@ -4,7 +4,13 @@ import math
 
 from algorithms.graph import Graph
 from algorithms.hamiltonian import exhaustive_search
-from algorithms.hybrid_astar import hybrid_astar
+from algorithms.hybrid_astar import (
+    DEFAULT_GOAL_ANGLE_TOLERANCE_RAD,
+    DEFAULT_GOAL_POS_TOLERANCE_CM,
+    HybridAstarResult,
+    _normalize_angle,
+    hybrid_astar,
+)
 from model import Obstacle, Robot, MotionPrimitive
 from typing import Literal, Optional, Union
 
@@ -126,6 +132,67 @@ def _commands_end_pose(start: Robot, commands: list[Command]) -> Robot:
     return pose
 
 
+# Nudges (cm, world-frame) tried on the PREVIOUS leg's own goal when the
+# CURRENT leg can't be planned - see _retry_previous_leg_for_escape.
+#
+# Two things were tried and abandoned before this one (see this file's git
+# history for the full attempts): a forward "escape hop" a few cm away from
+# the committed landing pose, then a real, collision-checked chain of
+# hybrid_astar's own motion primitives up to 5 steps deep from that same
+# landing pose. Neither worked on the real dead zone this was built against
+# - every pose reachable via a short real drive FROM that exact landing was
+# ALSO stuck, because the whole locally-reachable pocket around it can be
+# cut off in hybrid_astar's discretized state graph, not just the one exact
+# point. What does work: going back one step and re-landing the PREVIOUS
+# leg somewhere else entirely (confirmed - see the same history) - hybrid_
+# astar's own search for that leg had other pose it would have accepted as
+# "arrived", just not the one it happened to pop off the heap first.
+_BACKTRACK_NUDGES_CM = [
+    (dx, dy)
+    for dx in (-6, -4, -2, 0, 2, 4, 6)
+    for dy in (-6, -4, -2, 0, 2, 4, 6)
+    if (dx, dy) != (0, 0)
+]
+
+
+def _retry_previous_leg_for_escape(
+    prev_start: Robot,
+    prev_ideal_goal: Robot,
+    next_goal: Robot,
+    footprints: list,
+) -> tuple[HybridAstarResult, HybridAstarResult] | None:
+    """Re-plans the leg that landed on prev_ideal_goal toward small variants
+    of that same goal, keeping only variants whose landing is still within
+    the ordinary DEFAULT_GOAL_POS_TOLERANCE_CM/ANGLE of the REAL viewing
+    pose (never trading image-visibility for a working next leg - a variant
+    landing 9cm off the true pose is rejected even if it would otherwise
+    work), and returns the first variant whose landing can also reach
+    next_goal - or None if no variant can do both.
+
+    Only called when going straight from prev_start to next_goal already
+    failed AND landing exactly on prev_ideal_goal doesn't lead anywhere
+    (see plan_mission) - the direct, no-detour case is always tried first
+    and is unaffected by any of this.
+    """
+    for dx, dy in _BACKTRACK_NUDGES_CM:
+        nudged_goal = Robot(prev_ideal_goal.x_cm + dx, prev_ideal_goal.y_cm + dy, prev_ideal_goal.theta_rad)
+        prev_result = hybrid_astar(prev_start, nudged_goal, footprints)
+        if prev_result is None:
+            continue
+
+        landing = prev_result.path[-1]
+        pos_error_cm = math.hypot(landing.x_cm - prev_ideal_goal.x_cm, landing.y_cm - prev_ideal_goal.y_cm)
+        angle_error_rad = abs(_normalize_angle(landing.theta_rad - prev_ideal_goal.theta_rad))
+        if pos_error_cm > DEFAULT_GOAL_POS_TOLERANCE_CM or angle_error_rad > DEFAULT_GOAL_ANGLE_TOLERANCE_RAD:
+            continue  # would visit the previous obstacle "worse" than normal - not worth it
+
+        continuation = hybrid_astar(landing, next_goal, footprints)
+        if continuation is not None:
+            return prev_result, continuation
+
+    return None
+
+
 def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     """Plan a mission visiting obstacles in the order exhaustive_search picks.
 
@@ -149,6 +216,14 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     being skipped (Graph.build via graph._resolve_viewing_pose); id_pose_map
     below already carries that resolved pose.
 
+    A leg that can't be planned directly from wherever the previous leg
+    actually left the robot gets one more try before being skipped: re-land
+    the PREVIOUS leg on a small variant of its own goal (see
+    _retry_previous_leg_for_escape), still within its normal goal tolerance
+    of the real viewing pose, in case the exact pose that search happened
+    to land on falls in a dead zone that a different, equally valid landing
+    of that same leg is not actually stuck in.
+
     Raises PlanningError only if NOT ONE obstacle in the mission is
     reachable at all (nothing to drive).
     """
@@ -162,9 +237,32 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     skipped_ids: list[int] = []
     current_id = order[0]  # "S"
     current_pose = id_pose_map[current_id]  # updated to the actual pose reached after each leg
+    prev_leg_start_pose = current_pose  # the pose legs[-1] (once there is one) was planned from
 
     for target_id in order[1:]:
-        result = hybrid_astar(current_pose, id_pose_map[target_id], footprints)
+        target_pose = id_pose_map[target_id]
+        leg_start_pose = current_pose
+        result = hybrid_astar(leg_start_pose, target_pose, footprints)
+
+        if result is None and legs:
+            # Direct attempt failed and there's a previous leg to back up
+            # into - see _retry_previous_leg_for_escape and plan_mission's
+            # own docstring for why this is tried before giving up.
+            retry = _retry_previous_leg_for_escape(
+                prev_leg_start_pose, id_pose_map[legs[-1].to_id], target_pose, footprints
+            )
+            if retry is not None:
+                new_prev_result, result = retry
+                legs[-1] = Leg(
+                    from_id=legs[-1].from_id,
+                    to_id=legs[-1].to_id,
+                    commands=_primitives_to_commands(new_prev_result.primitives),
+                )
+                # legs[-1] now lands somewhere else - THIS leg (about to be
+                # appended below) actually starts from there, not from the
+                # original leg_start_pose captured above.
+                leg_start_pose = new_prev_result.path[-1]
+
         if result is None:
             skipped_ids.append(target_id)
             continue  # stay at current_id/current_pose, try the next obstacle in the order instead
@@ -172,6 +270,7 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
         commands = _primitives_to_commands(result.primitives)
         legs.append(Leg(from_id=current_id, to_id=target_id, commands=commands))
         current_id = target_id
+        prev_leg_start_pose = leg_start_pose
         # result.path[-1], not id_pose_map[target_id] or a Command
         # reconstruction: hybrid_astar only guarantees landing within its
         # goal tolerance of the viewing pose, so the next leg must plan from

@@ -6,10 +6,13 @@ isolation. Run with: pytest src/test_planner.py (from the repo root) or
 pytest test_planner.py (from inside src/).
 """
 
+import json
+from pathlib import Path
+
 import planner
 import pytest
-from algorithms.hybrid_astar import HybridAstarResult, _motion_primitives
-from model import Direction, MotionPrimitive, Obstacle, Robot
+from algorithms.hybrid_astar import DEFAULT_GOAL_POS_TOLERANCE_CM, HybridAstarResult, _motion_primitives
+from model import Direction, MotionPrimitive, Obstacle, Robot, parse_scenario
 
 
 def make_scenario(num_obstacles: int) -> tuple[Robot, list[Obstacle]]:
@@ -96,6 +99,64 @@ def test_planning_error_only_when_nothing_at_all_is_reachable(monkeypatch):
     robot, obstacles = make_scenario(3)
     with pytest.raises(planner.PlanningError):
         planner.plan_mission(robot, obstacles)
+
+
+def test_retry_previous_leg_rejects_a_landing_too_far_from_the_true_goal(monkeypatch):
+    """_retry_previous_leg_for_escape must never accept a nudge whose
+    landing strays outside the ordinary DEFAULT_GOAL_POS_TOLERANCE_CM of
+    the real viewing pose, even when every nudge and the continuation both
+    "succeed" - image-visibility quality is never traded for a working next
+    leg."""
+    true_goal = Robot(100.0, 100.0, 0.0)
+    next_goal = Robot(200.0, 100.0, 0.0)
+    prev_start = Robot.from_grid(0, 0, Direction.NORTH)
+    far_landing = Robot(true_goal.x_cm + DEFAULT_GOAL_POS_TOLERANCE_CM + 5, true_goal.y_cm, true_goal.theta_rad)
+    primitive = MotionPrimitive("forward_straight", 1, 0.0, 10)
+
+    def fake_hybrid_astar(start, goal, footprints):
+        return HybridAstarResult(path=[far_landing], primitives=[primitive], length=10.0)
+
+    monkeypatch.setattr(planner, "hybrid_astar", fake_hybrid_astar)
+
+    assert planner._retry_previous_leg_for_escape(prev_start, true_goal, next_goal, footprints=[]) is None
+
+
+def test_retry_previous_leg_accepts_a_landing_within_tolerance(monkeypatch):
+    true_goal = Robot(100.0, 100.0, 0.0)
+    next_goal = Robot(200.0, 100.0, 0.0)
+    prev_start = Robot.from_grid(0, 0, Direction.NORTH)
+    close_landing = Robot(true_goal.x_cm + 2, true_goal.y_cm, true_goal.theta_rad)  # well inside tolerance
+    primitive = MotionPrimitive("forward_straight", 1, 0.0, 10)
+
+    def fake_hybrid_astar(start, goal, footprints):
+        return HybridAstarResult(path=[close_landing], primitives=[primitive], length=10.0)
+
+    monkeypatch.setattr(planner, "hybrid_astar", fake_hybrid_astar)
+
+    retry = planner._retry_previous_leg_for_escape(prev_start, true_goal, next_goal, footprints=[])
+    assert retry is not None
+    prev_result, continuation = retry
+    assert prev_result.path[-1] == close_landing
+
+
+def test_backtrack_escape_rescues_a_real_previously_unreachable_map():
+    """4_obstacles/map_03.json: at LEFT_TURNING_RADIUS_CM=20, legs to
+    obstacles 1 and 0 used to fail completely - not because either goal was
+    blocked, but because the exact pose hybrid_astar committed to after
+    visiting obstacle 3 fell in a dead zone neither goal was reachable
+    from, while a different, equally valid landing of that same leg (still
+    within its own goal tolerance) was not stuck at all. Real map, real
+    (unmocked) plan_mission - a regression fixture for
+    _retry_previous_leg_for_escape."""
+    path = Path(__file__).resolve().parent / "testing" / "generated_maps" / "4_obstacles" / "map_03.json"
+    with path.open(encoding="utf-8") as f:
+        data = json.load(f)
+    robot, obstacles = parse_scenario(data)
+
+    plan = planner.plan_mission(robot, obstacles)
+
+    assert plan.skipped_ids == []
+    assert len(plan.legs) == 4
 
 
 def test_boundary_obstacle_facing_into_the_arena_is_planned_not_skipped():

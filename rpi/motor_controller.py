@@ -34,20 +34,46 @@ def _autodetect_port() -> str | None:
 SERIAL_PORT = os.environ.get("MOTOR_SERIAL_PORT") or _autodetect_port() or "COM5"
 BAUD_RATE = 115200
 
-SERVO_CENTER_US = 1712
-
-# STRAIGHT,GOCM / TURN,START limits enforced by the STM (drive_control.c).
-# Commands outside these ranges are rejected outright, so we route them to
-# the raw fallback instead of sending them and getting ERR,BAD_VALUE back.
+# STRAIGHT,GOCM / TURN,LEFT|RIGHT limits enforced by the STM (straight_control.c's
+# MIN/MAX_COMMAND_DISTANCE_CM, turn_control.c's CMD_MIN/MAX_ANGLE_DEG). Commands
+# outside these ranges are rejected outright, so we route them to the raw
+# fallback instead of sending them and getting ERR,BAD_VALUE back.
 STRAIGHT_MIN_CM = 10
-STRAIGHT_MAX_CM = 500
+STRAIGHT_MAX_CM = 200
 TURN_MIN_ANGLE_DEG = 5
+TURN_MAX_ANGLE_DEG = 360
 
-# --- Raw fallback path only (backward commands, or forward commands outside
-# the ranges above). NOT confirmed - no calibration build tests reversing.
-RAW_DRIVE_PWM = 2900              # reuses the confirmed forward BASE_PWM; unverified in reverse
-RAW_STEER_LEFT_US = 1512           # test_turn_calib.c's own "starting point, not final" value
-RAW_STEER_RIGHT_US = 1912          # ditto
+# --- Raw fallback path only (distance/angle outside the ranges above, in
+# either direction). NOT confirmed on hardware - matched to the closest
+# real firmware constants (mdp21_8's straight_tuning.h / turn_tuning.h /
+# robot_tuning.h), not measured directly against this fallback path itself.
+#
+# STRAIGHT only reaches here for out-of-GOCM-range distances now (>200cm -
+# fix moved in-range reverse onto closed-loop STRAIGHT,GOCM): matches
+# straight_tuning.h's LONG_BASE_PWM, the PWM the firmware's own LONG
+# straight profile drives at from the start.
+RAW_DRIVE_PWM = 2900
+
+# LEFT/RIGHT only reach here for shallow turns (< TURN_MIN_ANGLE_DEG=5deg),
+# well under turn_tuning.h's TURN_SMALL_ANGLE_DEG=15deg threshold. Below
+# that threshold turn_control.c's own closed-loop turn skips its kickstart
+# phase entirely and drives at TURN_SLOW_PWM from the start (see phase 0:
+# initial_pwm = angle <= TURN_SMALL_ANGLE_DEG ? TURN_SLOW_PWM :
+# TURN_KICKSTART_PWM) - so a kickstart pulse isn't needed here either, only
+# matched to the same gentle PWM the firmware itself would pick for an
+# angle this small.
+RAW_TURN_PWM = 2400
+
+# robot_tuning.h's CMD_SERVO_LEFT_US/CMD_SERVO_RIGHT_US - full steering
+# lock (the min-radius closed-loop turn's endpoint), not a dedicated
+# gentle-nudge value - there is no separate raw/open-loop steering
+# calibration anywhere in the firmware. Using full lock is deliberate here
+# though, not just "nothing else exists": tighter steering sweeps a given
+# small angle over less distance, which means less open-loop drift
+# accumulates (no gyro correction on this path) before ENC,GET,CM notices
+# the target's been reached and stops it.
+RAW_STEER_LEFT_US = 1000
+RAW_STEER_RIGHT_US = 2600
 # ---------------------------------------------------------------------------
 
 DISTANCE_TOLERANCE_CM = 0.5    # raw fallback: stop once within this much of the target
@@ -138,7 +164,10 @@ class MotorController:
 
     def _set_steering(self, turn: str) -> None:
         if turn == "STRAIGHT":
-            self._send(f"STEER,US,{SERVO_CENTER_US}")
+            # STEER,CENTER, not a hardcoded STEER,US value - it applies the
+            # STM's own tuned SERVO_CENTER_US (robot_tuning.h) directly, so
+            # this can't drift out of sync with the firmware's calibration.
+            self._send("STEER,CENTER")
         elif turn == "LEFT":
             self._send(f"STEER,US,{RAW_STEER_LEFT_US}")
         elif turn == "RIGHT":
@@ -155,12 +184,18 @@ class MotorController:
 
     def _execute_raw(self, command) -> None:
         """Open-loop fallback: fixed steering + poll encoder distance, no
-        gyro correction. Used for backward commands and for forward
-        commands too short/long/shallow for STRAIGHT,GOCM/TURN,START."""
+        gyro correction. Used for commands whose distance/angle falls
+        outside STRAIGHT,GOCM's or TURN,LEFT|RIGHT's supported range,
+        regardless of direction."""
         self._set_steering(command.turn)
         self._send("ENC,RESET")
 
-        pwm = RAW_DRIVE_PWM if command.direction == "FORWARD" else -RAW_DRIVE_PWM
+        # STRAIGHT only lands here for out-of-range distances (matches
+        # firmware's LONG straight PWM); LEFT/RIGHT only for shallow turns
+        # (matches firmware's below-TURN_SMALL_ANGLE_DEG PWM) - see the
+        # constants' own comments above for why these are the right match.
+        base_pwm = RAW_DRIVE_PWM if command.turn == "STRAIGHT" else RAW_TURN_PWM
+        pwm = base_pwm if command.direction == "FORWARD" else -base_pwm
         self._send(f"MOTOR,B,{pwm},{pwm}")
 
         target_cm = command.distance_cm
@@ -170,7 +205,8 @@ class MotorController:
                 if time.monotonic() > deadline:
                     raise MotorControllerError(
                         f"raw command did not reach {target_cm}cm within {COMMAND_TIMEOUT_S}s "
-                        "(wheel stuck? RAW_DRIVE_PWM too low? check hardware)"
+                        f"(wheel stuck? {'RAW_DRIVE_PWM' if command.turn == 'STRAIGHT' else 'RAW_TURN_PWM'} "
+                        "too low? check hardware)"
                     )
                 time.sleep(POLL_INTERVAL_S)
         finally:
@@ -187,16 +223,19 @@ class MotorController:
         turn = command.turn
 
         if turn == "STRAIGHT":
-            if direction == "FORWARD":
-                cm = round(command.distance_cm)
-                if STRAIGHT_MIN_CM <= cm <= STRAIGHT_MAX_CM:
-                    self._drive_straight_cm(cm)
-                    return
-            # REVERSE STRAIGHT has no closed-loop equivalent yet - falls
-            # through to the raw fallback below.
+            # STRAIGHT,GOCM's cm is signed - positive forward, negative
+            # backward (straight_control.c's Straight_StartCm) - so REVERSE
+            # goes through the same closed-loop command as FORWARD, just
+            # negated; only the distance range (not the direction) decides
+            # whether it's in range for GOCM at all.
+            cm = round(command.distance_cm)
+            if STRAIGHT_MIN_CM <= cm <= STRAIGHT_MAX_CM:
+                signed_cm = cm if direction == "FORWARD" else -cm
+                self._drive_straight_cm(signed_cm)
+                return
         else:
             degrees = round(command.swept_angle_deg)
-            if degrees >= TURN_MIN_ANGLE_DEG:
+            if TURN_MIN_ANGLE_DEG <= degrees <= TURN_MAX_ANGLE_DEG:
                 signed_degrees = degrees if direction == "FORWARD" else -degrees
                 radius_cm = LEFT_TURNING_RADIUS_CM if turn == "LEFT" else RIGHT_TURNING_RADIUS_CM
                 self._turn_arc(turn, radius_cm, signed_degrees)
