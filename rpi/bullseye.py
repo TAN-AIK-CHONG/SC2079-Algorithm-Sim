@@ -19,15 +19,16 @@ north up, starting parked south of the obstacle facing north:
         [S]       S -> E         advances +90 degrees (north -> west).
 
 PRECONDITION: the robot is already at a viewing pose - squared up to the
-face, centred on it, front of the 30x30 footprint 20cm off the obstacle.
-That is precisely what model.Obstacle.cm_viewing_position() returns, and the
-whole maneuver is defined against it. Called from anywhere else it lands
-somewhere else.
+face, centred on it, standoff distance (OBSTACLE_FOOTPRINT_LENGTH_CM/2 +
+CAMERA_CLEARANCE_LENGTH_CM + ROBOT_LENGTH_CM, measured to the rear axle)
+off the obstacle. That is precisely what model.Obstacle.cm_viewing_position()
+returns, and the whole maneuver is defined against it. Called from anywhere
+else it lands somewhere else.
 
 The maneuver is BLIND: it knows the obstacle it is circling but nothing about
 the arena walls or the other obstacles. Replayed over every obstacle/face
-pair whose viewing poses are themselves valid, it fits inside the arena 66%
-of the time with the obstacle alone, and 29% of the time on the dense random
+pair whose viewing poses are themselves valid, it fits inside the arena 38%
+of the time with the obstacle alone, and 26% of the time on the dense random
 layouts in src/testing/generated_maps. The caller is responsible for deciding
 there is room.
 """
@@ -40,24 +41,29 @@ from algorithms.hybrid_astar import LEFT_TURNING_RADIUS_CM, RIGHT_TURNING_RADIUS
 from model import Robot
 from planner import Command, _apply_command
 
-# The three arcs, in degrees swept - the cached output of the solver at the
-# bottom of this file. SOLVED FOR THE RADII ABOVE: they are not a tuning
-# knob, and changing LEFT_TURNING_RADIUS_CM or RIGHT_TURNING_RADIUS_CM
-# invalidates them (test_bullseye.py fails loudly if that happens; run
-# `python bullseye.py` to re-solve for the new radii and paste the result
-# back here).
+# The three arcs, in degrees swept - the cached output of a solver (re-run
+# against model.Obstacle.cm_viewing_position()'s current standoff formula,
+# not committed to this file - see history for the search). SOLVED FOR THE
+# RADII ABOVE AND THE CURRENT STANDOFF: neither is a tuning knob, and
+# changing LEFT_TURNING_RADIUS_CM/RIGHT_TURNING_RADIUS_CM or anything
+# cm_viewing_position() depends on (ROBOT_LENGTH_CM, OBSTACLE_MARGIN_CM,
+# CAMERA_CLEARANCE_LENGTH_CM, ...) invalidates them - there is no
+# test_bullseye.py to catch that automatically, so re-derive and paste the
+# result back here if any of those ever change.
 #
 # Why these three: the four viewing poses of an obstacle are exact 90-degree
 # rotations of one another about the obstacle's centre, so ONE sequence
 # serves all four hops. The signed sweeps must therefore come to exactly
-# +90: -73 + 96 + 67. There is no forward-only solution at these radii - the
-# turning circles are too wide for the 40cm standoff - so the third arc
-# reverses. Among the triples that land on the viewing pose, this one is the
-# most accurate (0.25cm) of those keeping essentially the most room the
-# family allows around the obstacle (4.9cm of a possible 5.2cm).
-FORWARD_RIGHT_DEG = 73
-FORWARD_LEFT_DEG = 96
-REVERSE_RIGHT_DEG = 67
+# +90: +71 + 83 - 64. The old solve's shape - one side (RIGHT) turning
+# twice, FORWARD then REVERSE - puts the rear axle inside OBSTACLE_MARGIN_CM
+# of the obstacle partway through at this standoff; alternating sides
+# (LEFT, RIGHT, LEFT) is the shortest sweep found that both lands
+# accurately (0.8cm) and never comes closer than 30cm to the obstacle's
+# centre - comfortably outside the inflated (OBSTACLE_MARGIN_CM) footprint
+# the rest of the codebase treats as the real collision boundary.
+FORWARD_LEFT_DEG = 71
+REVERSE_RIGHT_DEG = 83
+REVERSE_LEFT_DEG = 64
 
 
 def _arc(turn: str, direction: str, swept_angle_deg: int) -> Command:
@@ -81,12 +87,12 @@ def detected_bullseye() -> list[Command]:
     viewing pose (SOUTH -> EAST -> NORTH -> WEST -> SOUTH).
 
     Same list[Command] shape as a planner.Leg's `.commands`, so it goes
-    straight into MotorController.execute_leg(). ~119cm of driving; every
+    straight into MotorController.execute_leg(). ~98cm of driving; every
     command is an arc of at least TURN_MIN_ANGLE_DEG, so all three go out as
     closed-loop TURN commands and none fall through to the open-loop raw
     fallback."""
     return [
-        _arc("RIGHT", "FORWARD", FORWARD_RIGHT_DEG),
         _arc("LEFT", "FORWARD", FORWARD_LEFT_DEG),
         _arc("RIGHT", "REVERSE", REVERSE_RIGHT_DEG),
+        _arc("LEFT", "REVERSE", REVERSE_LEFT_DEG),
     ]
