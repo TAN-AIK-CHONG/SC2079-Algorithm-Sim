@@ -1,0 +1,8 @@
+testing/generated_maps/7_obstacles/map_048.json  6/7 reachable, 760cm (skipped 1)
+testing/generated_maps/8_obstacles/map_005.json  2/8 reachable, 140cm (skipped 4, 7, 6, 1, 3, 0)
+testing/generated_maps/8_obstacles/map_016.json  7/8 reachable, 620cm (skipped 7)
+testing/generated_maps/8_obstacles/map_034.json  7/8 reachable, 700cm (skipped 1)
+testing/generated_maps/8_obstacles/map_043.json  7/8 reachable, 650cm (skipped 0)
+testing/generated_maps/8_obstacles/map_044.json  7/8 reachable, 730cm (skipped 0)
+testing/generated_maps/8_obstacles/map_045.json  7/8 reachable, 770cm (skipped 6)
+testing/generated_maps/8_obstacles/map_047.json  7/8 reachable, 900cm (skipped 2)
