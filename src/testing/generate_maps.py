@@ -13,44 +13,17 @@ from model import (
     Obstacle,
     Robot,
 )
-from planner import PlanningError, plan_mission
+from visualize_map import draw, plan
 
 OUTPUT_DIR = ROOT_DIR / "testing" / "generated_maps"
-OBSTACLE_COUNTS = (4, 5, 6, 7, 8)
-MAPS_PER_COUNT = 3
+PNG_OUTPUT_DIR = ROOT_DIR / "testing" / "generated_maps_png"
+FAILURES_PATH = OUTPUT_DIR / "failures.txt"
+OBSTACLE_COUNTS = (7, 8)
+MAPS_PER_COUNT = 50
 
 ROBOT_START_CELL = (0, 0, Direction.NORTH)
 ROBOT_START = Robot.from_grid(*ROBOT_START_CELL)
 START_ZONE_CELLS = 4
-
-# Accept a random layout once at least this fraction of its obstacles are
-# reachable, rather than requiring every single one. Demanding 100% makes
-# _generate_map()'s retry loop take a very long time (most random layouts
-# have at least one obstacle hybrid_astar can't reach) - see
-# plan_mission()'s skip-and-continue behaviour, which this counts against.
-MIN_REACHABLE_FRACTION = 0.5
-
-
-def _meets_reachability_bar(robot: Robot, obstacles: list[Obstacle]) -> bool:
-    # plan_mission() itself, not a separate reimplementation (see
-    # testing/pathing.py's history) - a map this accepts is only actually
-    # useful for testing if the real production planner can solve it too.
-    try:
-        mission = plan_mission(robot, obstacles)
-    except PlanningError:
-        return False
-    return len(mission.legs) >= len(obstacles) * MIN_REACHABLE_FRACTION
-
-
-def _viewing_pose_ok(obstacle: Obstacle, obstacles: list[Obstacle]) -> bool:
-    return not footprint_in_collision(
-        obstacle.cm_viewing_position(),
-        [other.inflated_footprint_corners_cm() for other in obstacles],
-    )
-
-
-def _viewing_poses_ok(obstacles: list[Obstacle]) -> bool:
-    return all(_viewing_pose_ok(obstacle, obstacles) for obstacle in obstacles)
 
 
 def _generate_random_obstacle(obstacle_id: int, rng: random.Random) -> Obstacle:
@@ -77,14 +50,39 @@ def _generate_obstacles(num_obstacles: int, rng: random.Random) -> list[Obstacle
     return final_obstacles
 
 
-def _generate_map(
-    robot: Robot, num_obstacles: int, rng: random.Random
-) -> list[Obstacle]:
-    obstacles = _generate_obstacles(num_obstacles, rng)
-    while not (_viewing_poses_ok(obstacles) and _meets_reachability_bar(robot, obstacles)):
-        obstacles = _generate_obstacles(num_obstacles, rng)
+def _viewing_poses_ok(obstacles: list[Obstacle]) -> bool:
+    footprints = [
+        obstacle.inflated_footprint_corners_cm() for obstacle in obstacles
+    ]
+    return all(
+        not footprint_in_collision(obstacle.cm_viewing_position(), footprints)
+        for obstacle in obstacles
+    )
 
+
+def _generate_map(num_obstacles: int, rng: random.Random) -> list[Obstacle]:
+    obstacles = _generate_obstacles(num_obstacles, rng)
+    while not _viewing_poses_ok(obstacles):
+        obstacles = _generate_obstacles(num_obstacles, rng)
     return obstacles
+
+
+def _plan_summary(plan_result, num_obstacles: int) -> tuple[bool, str]:
+    """(every obstacle reached?, one-line summary) for a visualize_map.plan()
+    result.
+
+    A skipped obstacle counts as a failure here just as a total planning
+    failure does - in the real run both mean an obstacle never got
+    photographed, so both belong in the failure log.
+    """
+    _, final_path, length_cm, completed_legs, skipped_ids = plan_result
+    if not final_path:
+        return False, f"0/{num_obstacles} reachable - nothing could be planned at all"
+
+    summary = f"{completed_legs}/{num_obstacles} reachable, {length_cm:.0f}cm"
+    if skipped_ids:
+        summary += f" (skipped {', '.join(str(i) for i in skipped_ids)})"
+    return not skipped_ids, summary
 
 
 def _map_to_dict(
@@ -110,21 +108,51 @@ def _map_to_dict(
 
 
 def main():
-    for num_obstacles in OBSTACLE_COUNTS:
-        out_dir = OUTPUT_DIR / f"{num_obstacles}_obstacles"
-        out_dir.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    failures = 0
 
-        for map_index in range(1, MAPS_PER_COUNT + 1):
-            seed = num_obstacles * 10_000 + map_index
-            rng = random.Random(seed)
-            obstacles = _generate_map(ROBOT_START, num_obstacles, rng)
+    # Written a line at a time and flushed, not collected and dumped at the
+    # end: this run takes long enough to leave in the background, so the log
+    # has to be readable while it is still going and has to survive the run
+    # being killed part-way.
+    with FAILURES_PATH.open("w", encoding="utf-8") as failure_log:
+        for num_obstacles in OBSTACLE_COUNTS:
+            out_dir = OUTPUT_DIR / f"{num_obstacles}_obstacles"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            png_dir = PNG_OUTPUT_DIR / f"{num_obstacles}_obstacles"
+            png_dir.mkdir(parents=True, exist_ok=True)
 
-            out_path = out_dir / f"map_{map_index:02d}.json"
-            with out_path.open("w", encoding="utf-8") as file:
-                json.dump(_map_to_dict(ROBOT_START_CELL, obstacles), file, indent=4)
-                file.write("\n")
+            for map_index in range(1, MAPS_PER_COUNT + 1):
+                seed = num_obstacles * 10_000 + map_index
+                obstacles = _generate_map(num_obstacles, random.Random(seed))
 
-            print(f"wrote {out_path.relative_to(ROOT_DIR)}")
+                name = f"map_{map_index:03d}"
+                out_path = out_dir / f"{name}.json"
+                with out_path.open("w", encoding="utf-8") as file:
+                    json.dump(_map_to_dict(ROBOT_START_CELL, obstacles), file, indent=4)
+                    file.write("\n")
+
+                # One plan per map, shared by the failure log and the PNG -
+                # planning dominates this script's runtime, so the picture is
+                # drawn from the same result rather than re-planning.
+                plan_result = plan(ROBOT_START, obstacles)
+                png_path = png_dir / f"{name}.png"
+                draw(name, ROBOT_START, obstacles, plan_result, png_path)
+
+                solved, summary = _plan_summary(plan_result, num_obstacles)
+                line = f"{out_path.relative_to(ROOT_DIR)}  {summary}"
+                print(f"wrote {line} + {png_path.relative_to(ROOT_DIR)}", flush=True)
+
+                if not solved:
+                    failures += 1
+                    failure_log.write(line + "\n")
+                    failure_log.flush()
+
+    print(
+        f"\n{failures}/{len(OBSTACLE_COUNTS) * MAPS_PER_COUNT} maps not fully solved"
+        f" -> {FAILURES_PATH.relative_to(ROOT_DIR)}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

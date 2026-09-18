@@ -94,9 +94,19 @@ def plan(robot, obstacles):
     return order, final_path, float(length_cm), len(mission.legs), mission.skipped_ids
 
 
-def render(map_path: Path, out_path: Path):
+def render(map_path: Path, out_path: Path, plan_result=None):
+    """Render `map_path` to `out_path`, planning it unless the caller already
+    has a plan() result for it - planning is by far the slow part, so
+    generate_maps.py passes in the one it already computed rather than paying
+    for a second identical plan per map."""
     robot, obstacles = load_map(map_path)
-    order, final_path, length_cm, completed_legs, skipped_ids = plan(robot, obstacles)
+    draw(map_path.stem, robot, obstacles, plan_result or plan(robot, obstacles), out_path)
+
+
+def draw(title_stem: str, robot, obstacles, plan_result, out_path: Path):
+    """The plotting half of render(), split out so a caller holding a map in
+    memory (and its plan) can get a PNG without a JSON round-trip."""
+    order, final_path, length_cm, completed_legs, skipped_ids = plan_result
 
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.set_xlim(0, ARENA_LENGTH_CM)
@@ -179,7 +189,7 @@ def render(map_path: Path, out_path: Path):
         else f"skipped {len(skipped_ids)}: " + ", ".join(str(node_id) for node_id in skipped_ids)
     )
     ax.set_title(
-        f"{map_path.stem}  |  {len(obstacles)} obstacles  |  "
+        f"{title_stem}  |  {len(obstacles)} obstacles  |  "
         f"order: {' -> '.join(str(node_id) for node_id in order)}\n"
         f"length={length_cm:.1f}cm  legs={completed_legs}/{len(order) - 1}  {status}",
         fontsize=9,
