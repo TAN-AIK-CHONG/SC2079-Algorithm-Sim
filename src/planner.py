@@ -12,6 +12,7 @@ from algorithms.hybrid_astar import (
     _normalize_angle,
     hybrid_astar,
 )
+from collision import footprint_in_collision
 from model import Obstacle, Robot, MotionPrimitive
 from typing import Literal, Optional, Union
 
@@ -216,6 +217,48 @@ def _retry_previous_leg_for_escape(
     return None
 
 
+# Same idea as _RETRY_TIME_BUDGET_S: candidate_viewing_poses() has up to 8
+# fallback entries beyond the ideal (see model.VIEWING_POSE_OFFSET_CM), and
+# each one that's collision-free but still unreachable costs a full
+# exhaust-the-state-space search under 90-degree-only turns - tens of
+# seconds. A wall-clock budget keeps a pathological leg from stacking that
+# cost across every fallback entry.
+_ALT_VIEWING_POSE_TIME_BUDGET_S = 60.0
+
+
+def _retry_with_alternate_viewing_pose(
+    leg_start_pose: Robot, target_pose: Robot, obstacle: Obstacle, footprints: list
+) -> HybridAstarResult | None:
+    """The direct attempt at the obstacle's chosen viewing pose (target_pose)
+    already failed - hybrid_astar exhausted its whole reachable state space
+    without landing within tolerance, most likely a lattice mismatch between
+    the fixed-90-degree motion primitives and this exact pose (see this
+    project's own investigation into the legs this was built for: a state a
+    few cm away with the exactly correct heading exists, but no combination
+    of primitives lands both close enough AND square in one go).
+
+    obstacle.candidate_viewing_poses() already exists for a different
+    purpose (a neighbour or wall blocking the ideal pose outright - see
+    graph._resolve_viewing_pose) but the poses themselves - standing a bit
+    further along the obstacle's face, or a bit closer/further back, same
+    facing - are just as valid a vantage point for a lattice-mismatch retry
+    as for a collision one. Tries each remaining candidate (skipping
+    target_pose itself, already tried, and anything in collision) and
+    returns the first one hybrid_astar can actually reach, or None if none
+    can within _ALT_VIEWING_POSE_TIME_BUDGET_S.
+    """
+    deadline = time.monotonic() + _ALT_VIEWING_POSE_TIME_BUDGET_S
+    for candidate in obstacle.candidate_viewing_poses():
+        if candidate == target_pose or footprint_in_collision(candidate, footprints):
+            continue
+        if time.monotonic() > deadline:
+            break
+        result = hybrid_astar(leg_start_pose, candidate, footprints)
+        if result is not None:
+            return result
+    return None
+
+
 def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     """Plan a mission visiting obstacles in the order exhaustive_search picks.
 
@@ -239,13 +282,16 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     being skipped (Graph.build via graph._resolve_viewing_pose); id_pose_map
     below already carries that resolved pose.
 
-    A leg that can't be planned directly from wherever the previous leg
-    actually left the robot gets one more try before being skipped: re-land
-    the PREVIOUS leg on a small variant of its own goal (see
-    _retry_previous_leg_for_escape), still within its normal goal tolerance
-    of the real viewing pose, in case the exact pose that search happened
-    to land on falls in a dead zone that a different, equally valid landing
-    of that same leg is not actually stuck in.
+    A leg that can't be planned directly gets two more tries before being
+    skipped, in order: first, a different (still image-facing) vantage
+    point of the SAME obstacle, in case the chosen viewing pose just happens
+    to fall off the fixed-90-degree-turn lattice while a nearby, equally
+    valid one doesn't (see _retry_with_alternate_viewing_pose); then, if
+    that also fails, re-landing the PREVIOUS leg on a small variant of its
+    own goal (see _retry_previous_leg_for_escape), still within its normal
+    goal tolerance of the real viewing pose, in case the exact pose that
+    search happened to land on falls in a dead zone that a different,
+    equally valid landing of that same leg is not actually stuck in.
 
     Raises PlanningError only if NOT ONE obstacle in the mission is
     reachable at all (nothing to drive).
@@ -254,6 +300,7 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
     order = exhaustive_search(graph)
 
     id_pose_map = {node.id: node.viewing_pose for node in graph.nodes}
+    obstacle_by_id = {obstacle.id: obstacle for obstacle in obstacles}
     footprints = [obstacle.inflated_footprint_corners_cm() for obstacle in obstacles]
 
     legs: list[Leg] = []
@@ -266,6 +313,18 @@ def plan_mission(robot: Robot, obstacles: list[Obstacle]) -> MissionPlan:
         target_pose = id_pose_map[target_id]
         leg_start_pose = current_pose
         result = hybrid_astar(leg_start_pose, target_pose, footprints)
+
+        if result is None:
+            # Direct attempt at the chosen viewing pose failed - before
+            # touching the previous leg at all, see if a different (still
+            # valid, still image-facing) vantage point of the SAME obstacle
+            # happens to fall on a reachable point of the fixed-90-degree
+            # lattice. See _retry_with_alternate_viewing_pose.
+            alt_result = _retry_with_alternate_viewing_pose(
+                leg_start_pose, target_pose, obstacle_by_id[target_id], footprints
+            )
+            if alt_result is not None:
+                result = alt_result
 
         if result is None and legs:
             # Direct attempt failed and there's a previous leg to back up

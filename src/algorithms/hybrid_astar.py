@@ -6,7 +6,7 @@ from algorithms.dubins import dubins_length
 from collision import footprint_in_collision
 from model import Corners, Robot, MotionPrimitive
 
-STEP_CM = 10
+STEP_CM = 5
 SEGMENT_SAMPLES = 3
 COLLISION_SAMPLE_RESOLUTION_CM = 3  # see _segment_collision_free
 NUM_HEADING_BUCKETS = 72
