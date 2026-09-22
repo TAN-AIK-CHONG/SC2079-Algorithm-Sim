@@ -139,15 +139,21 @@ def test_retry_previous_leg_accepts_a_landing_within_tolerance(monkeypatch):
     assert prev_result.path[-1] == close_landing
 
 
-def test_backtrack_escape_rescues_a_real_previously_unreachable_map():
-    """4_obstacles/map_03.json: at LEFT_TURNING_RADIUS_CM=20, legs to
-    obstacles 1 and 0 used to fail completely - not because either goal was
-    blocked, but because the exact pose hybrid_astar committed to after
-    visiting obstacle 3 fell in a dead zone neither goal was reachable
-    from, while a different, equally valid landing of that same leg (still
-    within its own goal tolerance) was not stuck at all. Real map, real
-    (unmocked) plan_mission - a regression fixture for
-    _retry_previous_leg_for_escape."""
+def test_mission_with_a_genuinely_unreachable_leg_still_completes_the_rest():
+    """4_obstacles/map_03.json: with continuous-angle turns, this used to be
+    a dead-zone case _retry_previous_leg_for_escape rescued outright (the
+    exact pose hybrid_astar committed to after visiting obstacle 3 fell in a
+    pocket neither remaining goal was reachable from, while a different,
+    equally valid landing of that same leg was not stuck at all). Since the
+    team fixed turning to a mandatory 90 degrees (see hybrid_astar.py's
+    QUARTER_TURN_RAD), obstacle 3 is genuinely unreachable from every pose
+    _retry_previous_leg_for_escape tries here, not just stuck in a narrow
+    pocket - a real, disclosed trade-off of trading away arbitrary-angle
+    turns for predictable, well-calibrated 90-degree ones. This is now a
+    regression fixture for the other half of that behaviour instead: one
+    truly unreachable leg must still get skipped cleanly, not abort or
+    corrupt the rest of the mission. Real map, real (unmocked)
+    plan_mission."""
     path = Path(__file__).resolve().parent / "testing" / "generated_maps" / "4_obstacles" / "map_03.json"
     with path.open(encoding="utf-8") as f:
         data = json.load(f)
@@ -155,8 +161,8 @@ def test_backtrack_escape_rescues_a_real_previously_unreachable_map():
 
     plan = planner.plan_mission(robot, obstacles)
 
-    assert plan.skipped_ids == []
-    assert len(plan.legs) == 4
+    assert plan.skipped_ids == [3]
+    assert len(plan.legs) == 3
 
 
 def test_boundary_obstacle_facing_into_the_arena_is_planned_not_skipped():

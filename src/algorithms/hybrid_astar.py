@@ -8,11 +8,13 @@ from model import Corners, Robot, MotionPrimitive
 
 STEP_CM = 10
 SEGMENT_SAMPLES = 3
+COLLISION_SAMPLE_RESOLUTION_CM = 3  # see _segment_collision_free
 NUM_HEADING_BUCKETS = 72
 POS_RESOLUTION_CM = 5
 REVERSE_COST_MULTIPLIER = 1
 LEFT_TURNING_RADIUS_CM = 20
 RIGHT_TURNING_RADIUS_CM = 35
+QUARTER_TURN_RAD = math.pi / 2  # every turn is a fixed 90deg arc - see _motion_primitives
 
 DEFAULT_GOAL_POS_TOLERANCE_CM = 3
 DEFAULT_GOAL_ANGLE_TOLERANCE_RAD = math.radians(5)
@@ -32,15 +34,24 @@ def _normalize_angle(theta: float) -> float:
 
 
 def _motion_primitives(step: int) -> list[MotionPrimitive]:
-    dtheta_left = step / LEFT_TURNING_RADIUS_CM
-    dtheta_right = step / RIGHT_TURNING_RADIUS_CM
+    """MotionPrimitive for each available action. Turns are always a full
+    90-degree arc, not proportional to `step` - the team standardised on
+    exactly-90-degree turns only (better calibrated, more predictable, than
+    letting the search request arbitrary angles - see turn_tuning.h's
+    TURN_LEFT_TARGET_SCALE/TURN_RIGHT_TARGET_SCALE, tuned specifically
+    against A=90 commands). Only the straight primitives still scale with
+    `step`; a turn's arc LENGTH is whatever a quarter-circle at that side's
+    radius comes out to, rounded to the nearest cm to match the Command
+    model's integer distance_cm."""
+    left_arc_distance = round(LEFT_TURNING_RADIUS_CM * QUARTER_TURN_RAD)
+    right_arc_distance = round(RIGHT_TURNING_RADIUS_CM * QUARTER_TURN_RAD)
     return [
         MotionPrimitive("forward_straight", 1, 0.0, step),
-        MotionPrimitive("forward_left", 1, dtheta_left, step),
-        MotionPrimitive("forward_right", 1, -dtheta_right, step),
+        MotionPrimitive("forward_left", 1, QUARTER_TURN_RAD, left_arc_distance),
+        MotionPrimitive("forward_right", 1, -QUARTER_TURN_RAD, right_arc_distance),
         MotionPrimitive("reverse_straight", -1, 0.0, step),
-        MotionPrimitive("reverse_left", -1, -dtheta_left, step),
-        MotionPrimitive("reverse_right", -1, dtheta_right, step),
+        MotionPrimitive("reverse_left", -1, -QUARTER_TURN_RAD, left_arc_distance),
+        MotionPrimitive("reverse_right", -1, QUARTER_TURN_RAD, right_arc_distance),
     ]
 
 
@@ -73,8 +84,14 @@ def _segment_collision_free(
     theta: float,
     primitive: MotionPrimitive,
     obstacles: list[Corners],
-    samples: int = SEGMENT_SAMPLES,
 ) -> bool:
+    # SEGMENT_SAMPLES alone was tuned for ~STEP_CM-long primitives; a fixed
+    # 90-degree turn's arc is 3-5x longer (up to ~55cm at RIGHT_TURNING_RADIUS_CM),
+    # so a flat sample count would leave gaps along it wide enough to miss a
+    # real collision. Scaling with the primitive's own length keeps the gap
+    # between samples roughly constant (~COLLISION_SAMPLE_RESOLUTION_CM)
+    # regardless of how long the primitive actually is.
+    samples = max(SEGMENT_SAMPLES, round(primitive.distance / COLLISION_SAMPLE_RESOLUTION_CM))
     for i in range(samples + 1):
         sample = _advance(x, y, theta, primitive, i / samples)
         if footprint_in_collision(Robot(*sample), obstacles):

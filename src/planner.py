@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 import math
+import time
 
 from algorithms.graph import Graph
 from algorithms.hamiltonian import exhaustive_search
@@ -147,12 +148,29 @@ def _commands_end_pose(start: Robot, commands: list[Command]) -> Robot:
 # leg somewhere else entirely (confirmed - see the same history) - hybrid_
 # astar's own search for that leg had other pose it would have accepted as
 # "arrived", just not the one it happened to pop off the heap first.
+#
+# Kept deliberately small (16 points, nearest-first): with only fixed
+# 90-degree turns available (see hybrid_astar.py's QUARTER_TURN_RAD), a
+# hybrid_astar call that finds nothing has to exhaust its entire reachable
+# state space before giving up - tens of seconds, not the sub-second cost
+# this was tuned against when turns could be any small angle. A 48-point
+# grid at that per-attempt cost is minutes of dead time on a leg that may
+# simply no longer be rescuable at all under 90-degree-only turns; 16
+# points spread over two radii keeps the same "try a few nearby variants"
+# idea without that blowing up into a multi-minute stall.
 _BACKTRACK_NUDGES_CM = [
-    (dx, dy)
-    for dx in (-6, -4, -2, 0, 2, 4, 6)
-    for dy in (-6, -4, -2, 0, 2, 4, 6)
-    if (dx, dy) != (0, 0)
+    (radius_cm * math.cos(math.radians(angle_deg)), radius_cm * math.sin(math.radians(angle_deg)))
+    for radius_cm in (2, 4)
+    for angle_deg in range(0, 360, 45)
 ]
+
+# A hybrid_astar call that finds nothing has to exhaust its entire reachable
+# state space first - tens of seconds now, not the sub-second cost this
+# mechanism was tuned against. Trimming _BACKTRACK_NUDGES_CM to 16 points
+# only bounds the worst case to "16 x tens of seconds", still minutes; a
+# wall-clock budget bounds it to a fixed, predictable cost regardless of how
+# many points are in the list or how expensive each one turns out to be.
+_RETRY_TIME_BUDGET_S = 30.0
 
 
 def _retry_previous_leg_for_escape(
@@ -167,14 +185,19 @@ def _retry_previous_leg_for_escape(
     pose (never trading image-visibility for a working next leg - a variant
     landing 9cm off the true pose is rejected even if it would otherwise
     work), and returns the first variant whose landing can also reach
-    next_goal - or None if no variant can do both.
+    next_goal - or None if no variant can do both. Gives up once
+    _RETRY_TIME_BUDGET_S has elapsed, even with untried variants left - see
+    that constant's comment for why an attempt budget alone isn't enough.
 
     Only called when going straight from prev_start to next_goal already
     failed AND landing exactly on prev_ideal_goal doesn't lead anywhere
     (see plan_mission) - the direct, no-detour case is always tried first
     and is unaffected by any of this.
     """
+    deadline = time.monotonic() + _RETRY_TIME_BUDGET_S
     for dx, dy in _BACKTRACK_NUDGES_CM:
+        if time.monotonic() > deadline:
+            break
         nudged_goal = Robot(prev_ideal_goal.x_cm + dx, prev_ideal_goal.y_cm + dy, prev_ideal_goal.theta_rad)
         prev_result = hybrid_astar(prev_start, nudged_goal, footprints)
         if prev_result is None:
