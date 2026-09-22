@@ -7,33 +7,33 @@
     "obstacles": [
         {
             "id": 0,
-            "x_coord": 8,
-            "y_coord": 11,
-            "image_side": "EAST"
+            "x_coord": 15,
+            "y_coord": 18,
+            "image_side": "WEST"
         },
         {
             "id": 1,
-            "x_coord": 6,
-            "y_coord": 11,
-            "image_side": "EAST"
+            "x_coord": 10,
+            "y_coord": 7,
+            "image_side": "SOUTH"
         },
         {
             "id": 2,
-            "x_coord": 1,
-            "y_coord": 5,
+            "x_coord": 18,
+            "y_coord": 13,
             "image_side": "NORTH"
         },
         {
             "id": 3,
-            "x_coord": 13,
-            "y_coord": 15,
-            "image_side": "EAST"
+            "x_coord": 3,
+            "y_coord": 9,
+            "image_side": "NORTH"
         },
         {
             "id": 4,
-            "x_coord": 17,
-            "y_coord": 5,
-            "image_side": "NORTH"
+            "x_coord": 10,
+            "y_coord": 8,
+            "image_side": "SOUTH"
         }
     ]
 }
