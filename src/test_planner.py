@@ -6,13 +6,10 @@ isolation. Run with: pytest src/test_planner.py (from the repo root) or
 pytest test_planner.py (from inside src/).
 """
 
-import json
-from pathlib import Path
-
 import planner
 import pytest
 from algorithms.hybrid_astar import DEFAULT_GOAL_POS_TOLERANCE_CM, HybridAstarResult, _motion_primitives
-from model import Direction, MotionPrimitive, Obstacle, Robot, parse_scenario
+from model import Direction, MotionPrimitive, Obstacle, Robot
 
 
 def make_scenario(num_obstacles: int) -> tuple[Robot, list[Obstacle]]:
@@ -51,11 +48,15 @@ def test_unreachable_obstacle_is_skipped_not_fatal(monkeypatch):
     graph = planner.Graph.build(robot, obstacles)
     graph_order = planner.exhaustive_search(graph)
     unreachable_id = graph_order[1]  # whichever obstacle would be visited first
-    unreachable_pose = next(n.viewing_pose for n in graph.nodes if n.id == unreachable_id)
+    unreachable_obstacle = next(o for o in obstacles if o.id == unreachable_id)
+    # Every candidate, not just the ideal one - a genuinely unreachable
+    # obstacle must fail all of them, or this fake accidentally succeeds via
+    # planner._retry_with_alternate_viewing_pose instead of testing a skip.
+    unreachable_poses = set(unreachable_obstacle.candidate_viewing_poses())
 
     def fake_hybrid_astar(start, goal, footprints):
-        # Fail only the leg landing on the unreachable obstacle; succeed otherwise.
-        if goal == unreachable_pose:
+        # Fail every viewing-pose variant of the unreachable obstacle; succeed otherwise.
+        if goal in unreachable_poses:
             return None
         return fake_result()
 
@@ -77,10 +78,13 @@ def test_current_position_carries_forward_across_a_skip(monkeypatch):
     graph = planner.Graph.build(robot, obstacles)
     order = planner.exhaustive_search(graph)
     skip_id = order[1]
-    skip_pose = next(n.viewing_pose for n in graph.nodes if n.id == skip_id)
+    skip_obstacle = next(o for o in obstacles if o.id == skip_id)
+    # Every candidate, not just the ideal one - see
+    # test_unreachable_obstacle_is_skipped_not_fatal for why.
+    skip_poses = set(skip_obstacle.candidate_viewing_poses())
 
     def fake_hybrid_astar(start, goal, footprints):
-        if goal == skip_pose:
+        if goal in skip_poses:
             return None
         return fake_result()
 
@@ -139,24 +143,40 @@ def test_retry_previous_leg_accepts_a_landing_within_tolerance(monkeypatch):
     assert prev_result.path[-1] == close_landing
 
 
-def test_backtrack_escape_rescues_a_real_previously_unreachable_map():
-    """4_obstacles/map_03.json: at LEFT_TURNING_RADIUS_CM=20, legs to
-    obstacles 1 and 0 used to fail completely - not because either goal was
-    blocked, but because the exact pose hybrid_astar committed to after
-    visiting obstacle 3 fell in a dead zone neither goal was reachable
-    from, while a different, equally valid landing of that same leg (still
-    within its own goal tolerance) was not stuck at all. Real map, real
-    (unmocked) plan_mission - a regression fixture for
-    _retry_previous_leg_for_escape."""
-    path = Path(__file__).resolve().parent / "testing" / "generated_maps" / "4_obstacles" / "map_03.json"
-    with path.open(encoding="utf-8") as f:
-        data = json.load(f)
-    robot, obstacles = parse_scenario(data)
+def test_mission_with_a_genuinely_unreachable_leg_still_completes_the_rest(monkeypatch):
+    """This used to point at a real map (4_obstacles/map_03.json) whose
+    obstacle 3 was genuinely unreachable under fixed 90-degree turns even
+    after _retry_previous_leg_for_escape. It no longer is: planner.py grew a
+    second fallback, _retry_with_alternate_viewing_pose, tried first, which
+    happens to rescue that exact map now (a different, equally valid
+    vantage point of the same obstacle lands on the reachable lattice where
+    the ideal one didn't). Pinning this test to a specific real map made it
+    fragile to exactly this kind of improvement - the next fix might rescue
+    it too. Mocked instead: block every one of the target obstacle's
+    candidate_viewing_poses() (so _retry_with_alternate_viewing_pose can't
+    rescue it either), in a 3-obstacle chain so _retry_previous_leg_for_escape
+    also gets a real chance at the leg before giving up. Exercises the same
+    invariant the real map used to: one truly unreachable leg - even after
+    BOTH fallbacks - still gets skipped cleanly, not abort or corrupt the
+    rest of the mission."""
+    robot, obstacles = make_scenario(3)
+    graph = planner.Graph.build(robot, obstacles)
+    order = planner.exhaustive_search(graph)
+    unreachable_id = order[-1]  # the last one visited - so it has a previous leg to fall back into
+    unreachable_obstacle = next(o for o in obstacles if o.id == unreachable_id)
+    unreachable_poses = set(unreachable_obstacle.candidate_viewing_poses())
+
+    def fake_hybrid_astar(start, goal, footprints):
+        if goal in unreachable_poses:
+            return None
+        return fake_result()
+
+    monkeypatch.setattr(planner, "hybrid_astar", fake_hybrid_astar)
 
     plan = planner.plan_mission(robot, obstacles)
 
-    assert plan.skipped_ids == []
-    assert len(plan.legs) == 4
+    assert plan.skipped_ids == [unreachable_id]
+    assert len(plan.legs) == 2
 
 
 def test_boundary_obstacle_facing_into_the_arena_is_planned_not_skipped():
