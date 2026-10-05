@@ -6,6 +6,11 @@ from typing import Literal
 ARENA_LENGTH_CM = 200
 ROBOT_LENGTH_CM = 23
 ROBOT_WIDTH_CM = 19
+# Real distance from the REAR AXLE to the nose. The STM drives the rear-axle
+# midpoint, so the viewing standoff (cm_viewing_position) must place the AXLE,
+# not the rear bumper: standoff - AXLE_TO_FRONT_CM is where the nose lands. Using
+# ROBOT_LENGTH_CM there put the nose ~2 cm too far from the box.
+AXLE_TO_FRONT_CM = 21
 
 OBSTACLE_FOOTPRINT_LENGTH_CM = 10
 OBSTACLE_MARGIN_CM = 5
@@ -155,7 +160,8 @@ class Obstacle:
         standoff = (
             OBSTACLE_FOOTPRINT_LENGTH_CM / 2
             + CAMERA_CLEARANCE_LENGTH_CM
-            + ROBOT_LENGTH_CM
+            + AXLE_TO_FRONT_CM   # place the rear AXLE (what the STM drives), so the
+                                 # nose ends CAMERA_CLEARANCE_LENGTH_CM off the face
         )
         centre_x, centre_y = self.centre_cm()
         return Robot(
