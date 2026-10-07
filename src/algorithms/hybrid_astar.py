@@ -1,10 +1,11 @@
 import heapq
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from algorithms.dubins import dubins_length
 from collision import footprint_in_collision
-from model import Corners, Robot, MotionPrimitive
+from model import Corners, Obstacle, Robot, MotionPrimitive
 
 STEP_CM = 10
 SEGMENT_SAMPLES = 3
@@ -13,12 +14,6 @@ POS_RESOLUTION_CM = 5
 REVERSE_COST_MULTIPLIER = 1
 LEFT_TURNING_RADIUS_CM = 20
 RIGHT_TURNING_RADIUS_CM = 35
-
-DEFAULT_GOAL_POS_TOLERANCE_CM = 3
-DEFAULT_GOAL_ANGLE_TOLERANCE_RAD = math.radians(5)
-
-LOOSE_GOAL_POS_TOLERANCE_CM = 5
-LOOSE_GOAL_ANGLE_TOLERANCE_RAD = math.radians(10)
 
 TURN_CHANGE_PENALTY_CM = 5
 
@@ -104,34 +99,30 @@ def _centre(corners: Corners) -> tuple[float, float]:
 
 def hybrid_astar(
     start: Robot,
-    goal: Robot,
+    target: Obstacle,
     obstacles: list[Corners],
 ) -> HybridAstarResult | None:
-    for pos_tolerance_cm, angle_tolerance_rad in (
-        (DEFAULT_GOAL_POS_TOLERANCE_CM, DEFAULT_GOAL_ANGLE_TOLERANCE_RAD),
-        (LOOSE_GOAL_POS_TOLERANCE_CM, LOOSE_GOAL_ANGLE_TOLERANCE_RAD),
-    ):
-        result = _search(start, goal, obstacles, pos_tolerance_cm, angle_tolerance_rad)
-        if result is not None:
-            return result
-    return None
+    """Path to the first pose the search reaches from which the camera can
+    photograph target's image (Obstacle.is_viewed_from), or None if no such
+    pose is reachable."""
+    return next(viewing_arrivals(start, target, obstacles), None)
 
 
-def _search(
+def viewing_arrivals(
     start: Robot,
-    goal: Robot,
+    target: Obstacle,
     obstacles: list[Corners],
-    pos_tolerance_cm: float,
-    angle_tolerance_rad: float,
-) -> HybridAstarResult | None:
-    if footprint_in_collision(start, obstacles) or footprint_in_collision(
-        goal, obstacles
-    ):
-        print(
-            "Start or goal viewing pose is in collision with an obstacle or out of bounds."
-        )
-        return None
+) -> Iterator[HybridAstarResult]:
+    """Paths to every pose that views target's image, in the order the
+    search reaches them, one per (x, y, heading) cell. The first is what
+    hybrid_astar returns; the rest are other landings of the same leg."""
+    if footprint_in_collision(start, obstacles):
+        print("Start pose is in collision with an obstacle or out of bounds.")
+        return
 
+    # Aimed at the ideal pose, but the search stops at the first pose that
+    # already views the image, so it never manoeuvres closer than it must.
+    heuristic_goal = target.cm_viewing_position()
     actions = _motion_primitives(STEP_CM)
     heading_res = 2 * math.pi / NUM_HEADING_BUCKETS
 
@@ -152,7 +143,7 @@ def _search(
         )
 
     def heuristic(x, y, theta):
-        return dubins_length(Robot(x, y, theta), goal)
+        return dubins_length(Robot(x, y, theta), heuristic_goal)
 
     start_state = (start.x_cm, start.y_cm, start.theta_rad)
     start_key = state_key(*start_state, None)
@@ -161,6 +152,7 @@ def _search(
     came_from = {start_key: None}
     g_scores = {start_key: 0.0}
     visited = set()
+    arrived_cells = set()
 
     while open_heap:
         _, g, state, _, last_primitive_name = heapq.heappop(open_heap)
@@ -171,12 +163,10 @@ def _search(
             continue
         visited.add(key)
 
-        reached_goal = (
-            math.hypot(goal.x_cm - x, goal.y_cm - y) < pos_tolerance_cm
-            and abs(_normalize_angle(theta - goal.theta_rad)) < angle_tolerance_rad
-        )
-        if reached_goal:
-            return _reconstruct(came_from, start_state, key)
+        cell = key[:3]  # without last_primitive_name
+        if cell not in arrived_cells and target.is_viewed_from(Robot(x, y, theta)):
+            arrived_cells.add(cell)
+            yield _reconstruct(came_from, start_state, key)
 
         for primitive in actions:
             new_x, new_y, new_theta = _advance(x, y, theta, primitive)
@@ -201,8 +191,6 @@ def _search(
             came_from[new_key] = (key, (new_x, new_y, new_theta), primitive)
             new_f = new_g + heuristic(new_x, new_y, new_theta)
             heapq.heappush(open_heap, (new_f, new_g, (new_x, new_y, new_theta), key, primitive.name))
-
-    return None
 
 
 def _reconstruct(came_from, start_state, goal_key) -> HybridAstarResult:

@@ -25,29 +25,26 @@ NUM_GRIDS = 20
 GRID_LENGTH_CM = ARENA_LENGTH_CM // NUM_GRIDS
 OBSTACLE_FOOTPRINT_CELLS = OBSTACLE_FOOTPRINT_LENGTH_CM // GRID_LENGTH_CM
 
-# Fallback viewing-pose nudges (in cm), tried in order when an obstacle's
-# ideal viewing pose is blocked - a neighbouring obstacle sitting in it, or
-# the obstacle close enough to a wall that the ideal standoff puts the robot
-# out of bounds. (0, 0) is the ideal itself. Column 1 is toward the
-# obstacle: it eats into the 20cm camera clearance, capped at 10cm so at
-# least half of CAMERA_CLEARANCE_LENGTH_CM is kept and the robot's nose
-# never reaches the obstacle (see Obstacle.cm_viewing_position - the
-# standoff already accounts for ROBOT_LENGTH_CM, so shifting the rear-axle
-# pose toward the obstacle by X directly removes X of nose clearance).
-# Column 2 is sideways along the face: the image drifts off-centre in
-# frame, capped at 20cm. The single step back (-10, 0) is a last resort for
-# a neighbour clipping the ideal pose from behind.
-VIEWING_POSE_OFFSET_CM = (
-    (0, 0),
-    (0, 10), (0, -10),
-    (10, 0),
-    (10, 10), (10, -10),
-    (0, 20), (0, -20),
-    (-10, 0),
-)
+# A pose counts as "arrived" at an obstacle anywhere the camera can
+# photograph its image (see Obstacle.is_viewed_from), not only at the one
+# ideal cm_viewing_position, so the robot never shuffles on the spot to
+# square up exactly. The camera sits on the nose.
+MIN_CAMERA_DISTANCE_CM = 20
+MAX_CAMERA_DISTANCE_CM = 40
+# Images stay recognisable when viewed a bit obliquely.
+MAX_VIEWING_ANGLE_RAD = math.radians(20)
+# Keeps the image inside the camera frame.
+MAX_HEADING_ERROR_RAD = math.radians(10)
 
 Point = tuple[float, float]
 Corners = tuple[Point, Point, Point, Point]  # a footprint outline, walked in order
+
+
+def _angle_between(a: Point, b: Point) -> float:
+    """Unsigned angle between two vectors, in radians (0 to pi)."""
+    cross = a[0] * b[1] - a[1] * b[0]
+    dot = a[0] * b[0] + a[1] * b[1]
+    return abs(math.atan2(cross, dot))
 
 
 class Direction(Enum):
@@ -101,13 +98,24 @@ class Robot:
             facing.theta_rad,
         )
 
+    def heading_vector(self) -> Point:
+        return math.cos(self.theta_rad), math.sin(self.theta_rad)
+
+    def camera_position_cm(self) -> Point:
+        """The camera sits on the nose, AXLE_TO_FRONT_CM ahead of the rear axle."""
+        forward_x, forward_y = self.heading_vector()
+        return (
+            self.x_cm + AXLE_TO_FRONT_CM * forward_x,
+            self.y_cm + AXLE_TO_FRONT_CM * forward_y,
+        )
+
     def footprint_corners_cm(self) -> Corners:
         """
         The four corners of the robot's footprint at this pose, in cm.
 
         Returned clockwise, starting from left-rear wheel.
         """
-        forward_x, forward_y = math.cos(self.theta_rad), math.sin(self.theta_rad)
+        forward_x, forward_y = self.heading_vector()
         right_x, right_y = forward_y, -forward_x
         half = ROBOT_WIDTH_CM / 2
 
@@ -177,26 +185,26 @@ class Obstacle:
             self.image_side.opposite.theta_rad,  # look back at the image face
         )
 
-    def candidate_viewing_poses(self) -> list[Robot]:
-        """cm_viewing_position() (the ideal) first, then fallback poses for
-        when it's blocked - see VIEWING_POSE_OFFSET_CM. Every candidate
-        keeps the ideal facing (the camera still has to point at the image);
-        only the standing position shifts. The caller walks these in order
-        and takes the first collision-free one (algorithms/graph.py's
-        _resolve_viewing_pose)."""
-        ideal = self.cm_viewing_position()
-        # ideal.theta_rad is the robot's own facing, which points back at the
-        # obstacle (see cm_viewing_position) - so this IS "toward the image".
-        toward_x, toward_y = math.cos(ideal.theta_rad), math.sin(ideal.theta_rad)
-        along_x, along_y = -toward_y, toward_x  # perpendicular, i.e. along the face
-        return [
-            Robot(
-                ideal.x_cm + toward_x * toward + along_x * along,
-                ideal.y_cm + toward_y * toward + along_y * along,
-                ideal.theta_rad,
-            )
-            for toward, along in VIEWING_POSE_OFFSET_CM
-        ]
+    def image_centre_cm(self) -> Point:
+        centre_x, centre_y = self.centre_cm()
+        normal_x, normal_y = self.image_side.value
+        half = OBSTACLE_FOOTPRINT_LENGTH_CM / 2
+        return centre_x + normal_x * half, centre_y + normal_y * half
+
+    def is_viewed_from(self, robot: Robot) -> bool:
+        """Whether the camera at this pose can photograph the image: within
+        range of it, standing roughly in front of the face rather than off
+        to the side, and pointing at it."""
+        camera_x, camera_y = robot.camera_position_cm()
+        image_x, image_y = self.image_centre_cm()
+        image_to_camera = (camera_x - image_x, camera_y - image_y)
+        camera_to_image = (-image_to_camera[0], -image_to_camera[1])
+
+        distance_cm = math.hypot(*image_to_camera)
+        is_in_range = MIN_CAMERA_DISTANCE_CM <= distance_cm <= MAX_CAMERA_DISTANCE_CM
+        is_in_front = _angle_between(self.image_side.value, image_to_camera) <= MAX_VIEWING_ANGLE_RAD
+        is_facing_image = _angle_between(robot.heading_vector(), camera_to_image) <= MAX_HEADING_ERROR_RAD
+        return is_in_range and is_in_front and is_facing_image
 
 
 def parse_scenario(data: dict) -> tuple[Robot, list[Obstacle]]:
