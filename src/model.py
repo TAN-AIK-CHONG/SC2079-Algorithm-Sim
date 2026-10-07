@@ -25,7 +25,7 @@ OBSTACLE_FOOTPRINT_CELLS = OBSTACLE_FOOTPRINT_LENGTH_CM // GRID_LENGTH_CM
 MIN_CAMERA_DISTANCE_CM = 20
 MAX_CAMERA_DISTANCE_CM = 40
 # Images stay recognisable when viewed a bit obliquely.
-MAX_VIEWING_ANGLE_RAD = math.radians(20)
+MAX_VIEWING_ANGLE_RAD = math.radians(10)
 # Keeps the image inside the camera frame.
 MAX_HEADING_ERROR_RAD = math.radians(10)
 
