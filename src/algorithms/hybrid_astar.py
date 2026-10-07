@@ -15,7 +15,12 @@ REVERSE_COST_MULTIPLIER = 1
 LEFT_TURNING_RADIUS_CM = 20
 RIGHT_TURNING_RADIUS_CM = 35
 
-TURN_CHANGE_PENALTY_CM = 5
+# The real car drifts more on arcs and on every change of manoeuvre than on
+# straights, so these steer the search towards long straight runs with few,
+# deliberate turns.
+TURN_COST_MULTIPLIER = 6.0
+STEERING_CHANGE_PENALTY_CM = 15
+DIRECTION_SWITCH_PENALTY_CM = 25
 
 # NOTE: Arbitrarily set. Optimization: Don't compute collision against obstacle if the obstacle is further than this distance from the robot.
 MOVE_COLLISION_RADIUS_CM = 85
@@ -40,6 +45,26 @@ def _motion_primitives(step: int) -> list[MotionPrimitive]:
         MotionPrimitive("reverse_left", -1, -dtheta_left, step),
         MotionPrimitive("reverse_right", -1, dtheta_right, step),
     ]
+
+
+def _steering(primitive: MotionPrimitive) -> str:
+    return primitive.name.split("_")[1]
+
+
+def _transition_cost(previous: MotionPrimitive | None, primitive: MotionPrimitive) -> float:
+    cost = primitive.distance
+    if primitive.direction == -1:
+        cost *= REVERSE_COST_MULTIPLIER
+    if primitive.dtheta != 0.0:
+        cost *= TURN_COST_MULTIPLIER
+
+    if previous is None:
+        return cost
+    if _steering(primitive) != _steering(previous):
+        cost += STEERING_CHANGE_PENALTY_CM
+    if primitive.direction != previous.direction:
+        cost += DIRECTION_SWITCH_PENALTY_CM
+    return cost
 
 
 @dataclass
@@ -124,6 +149,7 @@ def viewing_arrivals(
     # already views the image, so it never manoeuvres closer than it must.
     heuristic_goal = target.cm_viewing_position()
     actions = _motion_primitives(STEP_CM)
+    actions_by_name = {action.name: action for action in actions}
     heading_res = 2 * math.pi / NUM_HEADING_BUCKETS
 
     def state_key(x, y, theta, last_primitive_name):
@@ -168,18 +194,14 @@ def viewing_arrivals(
             arrived_cells.add(cell)
             yield _reconstruct(came_from, start_state, key)
 
+        last_primitive = actions_by_name.get(last_primitive_name)
         for primitive in actions:
             new_x, new_y, new_theta = _advance(x, y, theta, primitive)
 
             if not _segment_collision_free(x, y, theta, primitive, obstacles):
                 continue
 
-            step_cost = primitive.distance * (
-                REVERSE_COST_MULTIPLIER if primitive.direction == -1 else 1
-            )
-            if last_primitive_name is not None and primitive.name != last_primitive_name:
-                step_cost += TURN_CHANGE_PENALTY_CM
-            new_g = g + step_cost
+            new_g = g + _transition_cost(last_primitive, primitive)
             new_key = state_key(new_x, new_y, new_theta, primitive.name)
 
             if new_key in visited:
