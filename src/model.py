@@ -6,16 +6,9 @@ from typing import Literal
 ARENA_LENGTH_CM = 200
 ROBOT_LENGTH_CM = 23
 ROBOT_WIDTH_CM = 19
-# Real distance from the REAR AXLE to the nose. The STM drives the rear-axle
-# midpoint, so the viewing standoff (cm_viewing_position) must place the AXLE,
-# not the rear bumper: standoff - AXLE_TO_FRONT_CM is where the nose lands. Using
-# ROBOT_LENGTH_CM there put the nose ~2 cm too far from the box.
-AXLE_TO_FRONT_CM = 21
-# Where the planner's pose sits relative to the back of the COLLISION
-# footprint. The 23 x 19 box is still measured from the pose (see
-# README_final_v1.md), so for collision and drawing purposes the pose is
-# the back edge: 0, not the real axle's offset.
-AXLE_TO_REAR_CM = 0
+# The pose is the rear-axle midpoint (what the STM drives), not the back edge.
+AXLE_TO_REAR_CM = 4
+AXLE_TO_FRONT_CM = ROBOT_LENGTH_CM - AXLE_TO_REAR_CM
 
 OBSTACLE_FOOTPRINT_LENGTH_CM = 10
 OBSTACLE_MARGIN_CM = 5
