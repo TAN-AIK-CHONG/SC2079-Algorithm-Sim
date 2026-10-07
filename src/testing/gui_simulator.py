@@ -1,10 +1,12 @@
-"""Tkinter simulator for the 20x20 arena: generate obstacles, plan a route
-over them, and watch the robot drive it.
+"""Tkinter simulator for the 20x20 arena: generate or hand-place obstacles,
+plan a route over them, and watch the robot drive it.
 
 Run from src/:
     python testing/gui_simulator.py
 """
 
+import json
+import math
 import queue
 import random
 import sys
@@ -20,19 +22,21 @@ sys.path.insert(0, str(ROOT_DIR))
 
 from algorithms.graph import Graph
 from algorithms.hamiltonian import exhaustive_search, path_length
-from algorithms.hybrid_astar import hybrid_astar
 from collision import footprint_in_collision
-from planner import Command, _apply_command, _primitives_to_commands
+from planner import Command, PlanningError, _apply_command, plan_mission
 from model import (
     ARENA_LENGTH_CM,
+    AXLE_TO_REAR_CM,
     GRID_LENGTH_CM,
     NUM_GRIDS,
     OBSTACLE_FOOTPRINT_LENGTH_CM,
+    ROBOT_WIDTH_CM,
     Corners,
     Direction,
     Obstacle,
     Point,
     Robot,
+    parse_scenario,
 )
 
 CELL_PX = 30
@@ -54,6 +58,12 @@ MAX_OBSTACLES = 8
 # It fits, but only just; gaps this tight are rarely usable in practice.
 MIN_OBSTACLE_SEPARATION_CELLS = 4
 IMAGE_IDS = tuple(range(11, 41))  # the target IDs the camera can come back with
+
+# Clicking an obstacle that is already placed turns its image side clockwise.
+HEADING_CYCLE = (Direction.NORTH, Direction.EAST, Direction.SOUTH, Direction.WEST)
+# Tk on macOS reports the right mouse button as Button-2; elsewhere it is Button-3.
+RIGHT_CLICK_EVENTS = ("<Button-2>", "<Button-3>")
+JSON_INDENT = 4
 
 ANIMATION_MS = 40  # one path step (5cm of driving) per tick
 POLL_MS = 50  # how often the UI drains the planner thread's queue
@@ -80,6 +90,7 @@ COLOURS = {
     "obstacle_margin": "#b07070",
     "image_side": "#d64545",
     "axle": "#123f66",
+    "turn_centre": "#8e44ad",
     "robot": "#4a90d9",
     "robot_front": "#f5a623",
     "pose": "#e08a00",
@@ -100,9 +111,40 @@ def _footprint_centre_cm(robot: Robot) -> Point:
 
 
 def _front_edge_cm(robot: Robot) -> tuple[Point, Point]:
-    """The two corners one footprint-length ahead of the pose: the robot's face."""
+    """The footprint's two front corners: the robot's face."""
     corners = robot.footprint_corners_cm()
     return corners[1], corners[2]
+
+
+def _left_unit(theta_rad: float) -> Point:
+    """Unit vector pointing to the robot's left at heading theta_rad."""
+    return -math.sin(theta_rad), math.cos(theta_rad)
+
+
+def _rear_axle_cm(robot: Robot) -> tuple[Point, Point]:
+    """The rear axle's two ends, where the rear wheels sit: across the full
+    width of the footprint, through the pose."""
+    half = ROBOT_WIDTH_CM / 2
+    left_x, left_y = _left_unit(robot.theta_rad)
+    return (
+        (robot.x_cm + half * left_x, robot.y_cm + half * left_y),
+        (robot.x_cm - half * left_x, robot.y_cm - half * left_y),
+    )
+
+
+def _turn_centre_cm(start: Robot, command: Command) -> Point | None:
+    """The point an arc Command pivots about: level with the rear axle, one
+    turning radius out on the steered side (the same side whether driving
+    forward or reversing). None for a straight."""
+    if command.turn == "STRAIGHT":
+        return None
+    radius_cm = command.distance_cm / math.radians(command.swept_angle_deg)
+    side_sign = 1 if command.turn == "LEFT" else -1
+    left_x, left_y = _left_unit(start.theta_rad)
+    return (
+        start.x_cm + side_sign * radius_cm * left_x,
+        start.y_cm + side_sign * radius_cm * left_y,
+    )
 
 
 @dataclass
@@ -111,6 +153,7 @@ class Leg:
 
     goal_id: str | int
     poses: list[Robot]
+    turn_centres: list[Point | None]  # per pose: what its arc pivots about, None on a straight
     length_cm: float
 
 
@@ -176,6 +219,35 @@ def generate_obstacles(count: int, rng: random.Random) -> list[Obstacle]:
             return obstacles
 
 
+def scenario_dict(start_cell: tuple[int, int, Direction], obstacles: list[Obstacle]) -> dict:
+    """The layout in the scenario JSON shape model.parse_scenario reads."""
+    x_coord, y_coord, facing = start_cell
+    return {
+        "robot": {"x_coord": x_coord, "y_coord": y_coord, "facing": facing.name},
+        "obstacles": [
+            {
+                "id": obstacle.id,
+                "x_coord": obstacle.x_coord,
+                "y_coord": obstacle.y_coord,
+                "image_side": obstacle.image_side.name,
+            }
+            for obstacle in obstacles
+        ],
+    }
+
+
+def _renumbered(obstacles: list[Obstacle]) -> list[Obstacle]:
+    """Ids 0..n-1 in placement order, so removing one leaves no gap."""
+    return [
+        Obstacle(index, obstacle.x_coord, obstacle.y_coord, obstacle.image_side)
+        for index, obstacle in enumerate(obstacles)
+    ]
+
+
+def _next_heading(heading: Direction) -> Direction:
+    return HEADING_CYCLE[(HEADING_CYCLE.index(heading) + 1) % len(HEADING_CYCLE)]
+
+
 # --------------------------------------------------------------------------
 # Planning (runs off the UI thread)
 # --------------------------------------------------------------------------
@@ -194,57 +266,55 @@ def _arc_poses(start: Robot, command: Command, step_cm: float) -> list[Robot]:
     ]
 
 
-def _leg_poses(start: Robot, commands: list[Command]) -> list[Robot]:
+def _leg_poses(
+    start: Robot, commands: list[Command]
+) -> tuple[list[Robot], list[Point | None]]:
     """The full smoothed trajectory for a leg: straights and true arcs
-    chained end to end, one Command at a time."""
+    chained end to end, one Command at a time - plus, for every pose, the
+    centre of the arc it is on (None on a straight)."""
     poses = [start]
+    turn_centres: list[Point | None] = [None]
     for command in commands:
-        poses.extend(_arc_poses(poses[-1], command, SAMPLE_STEP_CM))
-    return poses
+        command_poses = _arc_poses(poses[-1], command, SAMPLE_STEP_CM)
+        turn_centres.extend([_turn_centre_cm(poses[-1], command)] * len(command_poses))
+        poses.extend(command_poses)
+    return poses, turn_centres
 
 
 def plan_route(start: Robot, obstacles: list[Obstacle], emit) -> Plan:
-    """Plan a route over obstacles in exhaustive_search's order. If an
-    obstacle turns out to be unreachable from wherever the robot currently
-    is, it's skipped - not visited - and planning continues toward the next
-    obstacle in the order, still from the last position actually reached.
-    One unreachable obstacle no longer cancels every obstacle after it."""
+    """Plan with planner.plan_mission() - the same function rpi/main.py calls
+    for the real run, leg recovery included - so the simulator drives the
+    route the robot actually would. An obstacle no leg can reach is skipped,
+    not visited."""
     graph = Graph.build(start, obstacles)
     order = exhaustive_search(graph)
     emit(
         f"Order (exhaustive search): {' -> '.join(str(i) for i in order)}"
         f"  [{path_length(graph, order):.0f}cm as Reeds-Shepp hops]"
     )
+    plan = Plan(order=order, node_robots={node.id: node.viewing_pose for node in graph.nodes})
 
-    node_robots = {node.id: node.viewing_pose for node in graph.nodes}
-    # Inflated, not true: every collision check works against the safety outline
-    # (model.OBSTACLE_MARGIN_CM). The canvas still draws both.
-    footprints = [obstacle.inflated_footprint_corners_cm() for obstacle in obstacles]
-    plan = Plan(order=order, node_robots=node_robots)
+    try:
+        mission = plan_mission(start, obstacles)
+    except PlanningError:
+        plan.skipped_ids = order[1:]
+        return plan
 
-    current_id = order[0]  # "S"
-    current_pose = node_robots[current_id]  # updated to the actual pose reached after each leg
-    for target_id in order[1:]:
-        result = hybrid_astar(current_pose, node_robots[target_id], footprints)
-        if result is None:
-            plan.skipped_ids.append(target_id)
-            emit(f"Leg {current_id} -> {target_id}: NO PATH FOUND, skipping obstacle {target_id}")
-            continue  # stay at current_id/current_pose, try the next obstacle in the order instead
-
-        commands = _primitives_to_commands(result.primitives)
-        poses = _leg_poses(current_pose, commands)
-        plan.legs.append(Leg(target_id, poses, result.length))
-        plan.length_cm += result.length
+    current_pose = start
+    for mission_leg in mission.legs:
+        poses, turn_centres = _leg_poses(current_pose, mission_leg.commands)
+        length_cm = sum(command.distance_cm for command in mission_leg.commands)
+        plan.legs.append(Leg(mission_leg.to_id, poses, turn_centres, length_cm))
+        plan.length_cm += length_cm
         emit(
-            f"Leg {current_id} -> {target_id}: {result.length:.0f}cm over {len(commands)} commands"
+            f"Leg {mission_leg.from_id} -> {mission_leg.to_id}: {length_cm}cm "
+            f"over {len(mission_leg.commands)} commands"
         )
-        current_id = target_id
-        # Not node_robots[target_id]: hybrid_astar only guarantees landing
-        # within its goal tolerance of the viewing pose, so the next leg
-        # must plan from where the robot will actually be - the same pose
-        # the drawn/animated trajectory for this leg ends on.
         current_pose = poses[-1]
 
+    plan.skipped_ids = mission.skipped_ids
+    for skipped_id in mission.skipped_ids:
+        emit(f"NO PATH FOUND to obstacle {skipped_id}, skipping it")
     return plan
 
 
@@ -259,7 +329,8 @@ class SimulatorApp:
         self.root.title("SC2079 Arena Simulator")
 
         self.rng = random.Random()
-        self.start_robot = Robot.from_grid(*ROBOT_START_CELL)
+        self.start_cell = ROBOT_START_CELL
+        self.start_robot = Robot.from_grid(*self.start_cell)
         self.obstacles: list[Obstacle] = []
         self.image_ids: dict[int, int] = {}
         self.plan: Plan | None = None
@@ -282,6 +353,12 @@ class SimulatorApp:
             "Ready. Robot footprint's bottom-left at grid "
             f"({ROBOT_START_CELL[0]}, {ROBOT_START_CELL[1]}) facing "
             f"{ROBOT_START_CELL[2].name}."
+        )
+        self._log(
+            "Rear axle (dark line and dot) at "
+            f"({self.start_robot.x_cm:.0f}, {self.start_robot.y_cm:.0f})cm, "
+            f"{AXLE_TO_REAR_CM}cm in from the back of the footprint. While "
+            "turning, the purple dot is the point the robot pivots about."
         )
         self.root.after(POLL_MS, self._drain_events)
 
@@ -326,6 +403,8 @@ class SimulatorApp:
         )
         self.generate_button.pack(fill=tk.X, pady=2)
 
+        self._build_manual_controls(controls)
+
         self.plan_button = ttk.Button(controls, text="Plan path", command=self.on_plan)
         self.plan_button.pack(fill=tk.X, pady=2)
 
@@ -364,6 +443,54 @@ class SimulatorApp:
         self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+    def _build_manual_controls(self, parent: ttk.Frame) -> None:
+        manual = ttk.LabelFrame(parent, text="Manual placement", padding=6)
+        manual.pack(fill=tk.X, pady=(6, 6))
+
+        self.manual_var = tk.BooleanVar(value=False)
+        self.manual_check = ttk.Checkbutton(
+            manual,
+            text="Place obstacles by clicking",
+            variable=self.manual_var,
+            command=self._on_manual_toggled,
+        )
+        self.manual_check.pack(anchor="w")
+
+        heading_row = ttk.Frame(manual)
+        heading_row.pack(fill=tk.X, pady=(4, 2))
+        ttk.Label(heading_row, text="Image side:").pack(side=tk.LEFT)
+        self.heading_var = tk.StringVar(value=Direction.NORTH.name)
+        ttk.Combobox(
+            heading_row,
+            textvariable=self.heading_var,
+            values=[heading.name for heading in HEADING_CYCLE],
+            width=7,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=6)
+
+        ttk.Label(
+            manual,
+            text=(
+                f"Left-click an empty cell to place (max {MAX_OBSTACLES}), "
+                "left-click an obstacle to rotate its image side, "
+                "right-click to remove."
+            ),
+            wraplength=300,
+            foreground=COLOURS["label"],
+        ).pack(fill=tk.X, pady=(2, 4))
+
+        self.clear_button = ttk.Button(
+            manual, text="Clear obstacles", command=self.on_clear
+        )
+        self.clear_button.pack(fill=tk.X, pady=2)
+
+        self.json_button = ttk.Button(manual, text="Show JSON", command=self.on_show_json)
+        self.json_button.pack(fill=tk.X, pady=2)
+
+        self.canvas.bind("<Button-1>", self.on_canvas_left_click)
+        for event in RIGHT_CLICK_EVENTS:
+            self.canvas.bind(event, self.on_canvas_right_click)
+
     # -- canvas ------------------------------------------------------------
 
     def _to_px(self, x_cm: float, y_cm: float) -> Point:
@@ -372,6 +499,14 @@ class SimulatorApp:
             MARGIN_PX + x_cm * PX_PER_CM,
             MARGIN_PX + (ARENA_LENGTH_CM - y_cm) * PX_PER_CM,
         )
+
+    def _px_to_cell(self, x_px: float, y_px: float) -> tuple[int, int] | None:
+        """Canvas pixels -> the grid cell under them, or None off the arena."""
+        x_cm = (x_px - MARGIN_PX) / PX_PER_CM
+        y_cm = ARENA_LENGTH_CM - (y_px - MARGIN_PX) / PX_PER_CM
+        if not (0 <= x_cm < ARENA_LENGTH_CM and 0 <= y_cm < ARENA_LENGTH_CM):
+            return None
+        return int(x_cm // GRID_LENGTH_CM), int(y_cm // GRID_LENGTH_CM)
 
     def _polygon_px(self, corners) -> list[float]:
         return [value for corner in corners for value in self._to_px(*corner)]
@@ -571,7 +706,9 @@ class SimulatorApp:
                 tags="plan",
             )
 
-    def _draw_robot(self) -> None:
+    def _draw_robot(self, turn_centre_cm: Point | None = None) -> None:
+        """Draws self.robot. Pass the arc's centre while it is turning, to
+        show the point it pivots about."""
         self.canvas.delete("robot")
         corners = self.robot.footprint_corners_cm()
 
@@ -593,6 +730,15 @@ class SimulatorApp:
             width=4,
             tags="robot",
         )
+        # The rear axle, wheel to wheel, AXLE_TO_REAR_CM in from the back.
+        axle_left, axle_right = _rear_axle_cm(self.robot)
+        self.canvas.create_line(
+            *self._to_px(*axle_left),
+            *self._to_px(*axle_right),
+            fill=COLOURS["axle"],
+            width=3,
+            tags="robot",
+        )
         # Axle -> nose, so the arrow gives the heading AND shows where in the
         # body the tracked point actually sits.
         front_mid = (
@@ -609,6 +755,8 @@ class SimulatorApp:
             arrow=tk.LAST,
             tags="robot",
         )
+        if turn_centre_cm is not None:
+            self._draw_turn_centre(turn_centre_cm)
         # The rear-axle midpoint itself, drawn last so it stays visible: this is
         # the pose hybrid_astar propagates, and what the path and trail trace.
         self.canvas.create_oval(
@@ -618,6 +766,29 @@ class SimulatorApp:
             axle_y_px + 4,
             fill=COLOURS["axle"],
             outline="white",
+            tags="robot",
+        )
+
+    def _draw_turn_centre(self, centre_cm: Point) -> None:
+        """The point the robot is pivoting about, joined to its rear-axle
+        midpoint. A car pivots about a point level with its rear axle, so
+        this dashed line should always run straight along the axle."""
+        centre_x_px, centre_y_px = self._to_px(*centre_cm)
+        self.canvas.create_line(
+            centre_x_px,
+            centre_y_px,
+            *self._to_px(self.robot.x_cm, self.robot.y_cm),
+            fill=COLOURS["turn_centre"],
+            dash=(4, 3),
+            tags="robot",
+        )
+        self.canvas.create_oval(
+            centre_x_px - 4,
+            centre_y_px - 4,
+            centre_x_px + 4,
+            centre_y_px + 4,
+            fill=COLOURS["turn_centre"],
+            outline="",
             tags="robot",
         )
 
@@ -641,20 +812,8 @@ class SimulatorApp:
     # -- actions -----------------------------------------------------------
 
     def on_generate(self) -> None:
-        self._stop_animation()
         count = self.count_var.get()
-        self.obstacles = generate_obstacles(count, self.rng)
-        self.image_ids = {
-            obstacle.id: self.rng.choice(IMAGE_IDS) for obstacle in self.obstacles
-        }
-        self.plan = None
-        self.robot = self.start_robot
-
-        self._clear_trail()
-        self.canvas.delete("plan")
-        self._draw_obstacles()
-        self._draw_robot()
-        self._update_buttons()
+        self._set_obstacles(generate_obstacles(count, self.rng))
 
         self.status_var.set(f"{count} obstacles placed. Plan a path next.")
         self._log(f"Generated {count} obstacles:")
@@ -666,6 +825,145 @@ class SimulatorApp:
                 f"viewing axle ({pose.x_cm:.0f}, {pose.y_cm:.0f})cm "
                 f"facing {obstacle.image_side.opposite.name}"
             )
+
+    def on_clear(self) -> None:
+        self._set_obstacles([])
+        self.status_var.set("Obstacles cleared.")
+        self._log("Obstacles cleared.")
+
+    def on_canvas_left_click(self, event: tk.Event) -> None:
+        cell = self._editable_cell(event)
+        if cell is None:
+            return
+
+        existing = self._obstacle_at(cell)
+        if existing is not None:
+            self._rotate_obstacle(existing)
+            return
+        self._place_obstacle(cell)
+
+    def on_canvas_right_click(self, event: tk.Event) -> None:
+        cell = self._editable_cell(event)
+        if cell is None:
+            return
+
+        existing = self._obstacle_at(cell)
+        if existing is None:
+            return
+        self._set_obstacles(_renumbered([o for o in self.obstacles if o is not existing]))
+        self._log(f"Removed obstacle at {cell}; {len(self.obstacles)} left.")
+        self.status_var.set(f"{len(self.obstacles)} obstacles placed.")
+
+    def on_show_json(self) -> None:
+        text = json.dumps(scenario_dict(self.start_cell, self.obstacles), indent=JSON_INDENT)
+        print(text, flush=True)
+
+        window = tk.Toplevel(self.root)
+        window.title("Scenario JSON")
+        box = tk.Text(window, width=48, height=30, wrap=tk.NONE)
+        box.insert("1.0", text)
+        box.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
+
+        def copy() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(box.get("1.0", "end-1c"))
+            self._log("Scenario JSON copied to clipboard.")
+
+        def import_json() -> None:
+            if self._import_scenario(box.get("1.0", "end-1c")):
+                window.destroy()
+
+        buttons = ttk.Frame(window)
+        buttons.pack(pady=(0, 8))
+        ttk.Button(buttons, text="Copy to clipboard", command=copy).pack(side=tk.LEFT, padx=4)
+        ttk.Button(buttons, text="Import JSON", command=import_json).pack(side=tk.LEFT, padx=4)
+
+    def _import_scenario(self, text: str) -> bool:
+        """Replace the robot start and obstacles with a pasted scenario.
+        Returns whether the import went through."""
+        if self._is_layout_locked():
+            self._log("Can't import while planning or driving; wait or pause first.")
+            return False
+        try:
+            data = json.loads(text)
+            start_robot, obstacles = parse_scenario(data)
+        except (ValueError, KeyError, TypeError) as exc:
+            self._log(f"Import failed, not a valid scenario: {exc!r}")
+            self.status_var.set("Import failed: not a valid scenario JSON.")
+            return False
+
+        robot = data["robot"]
+        self.start_cell = (robot["x_coord"], robot["y_coord"], Direction[robot["facing"]])
+        self.start_robot = start_robot
+        self._set_obstacles(obstacles)
+        self._log(
+            f"Imported scenario: robot at ({self.start_cell[0]}, {self.start_cell[1]}) "
+            f"facing {self.start_cell[2].name}, {len(obstacles)} obstacles."
+        )
+        self.status_var.set(f"{len(obstacles)} obstacles imported. Plan a path next.")
+        return True
+
+    def _on_manual_toggled(self) -> None:
+        manual = self.manual_var.get()
+        self.canvas.configure(cursor="crosshair" if manual else "")
+        if manual:
+            self.status_var.set("Manual placement: click the arena to place obstacles.")
+
+    def _editable_cell(self, event: tk.Event) -> tuple[int, int] | None:
+        """The clicked cell, or None when the layout must not change right now."""
+        if not self.manual_var.get() or self._is_layout_locked():
+            return None
+        return self._px_to_cell(event.x, event.y)
+
+    def _is_layout_locked(self) -> bool:
+        return self.running or getattr(self, "busy", False)
+
+    def _obstacle_at(self, cell: tuple[int, int]) -> Obstacle | None:
+        return next(
+            (o for o in self.obstacles if (o.x_coord, o.y_coord) == cell), None
+        )
+
+    def _rotate_obstacle(self, obstacle: Obstacle) -> None:
+        heading = _next_heading(obstacle.image_side)
+        rotated = Obstacle(obstacle.id, obstacle.x_coord, obstacle.y_coord, heading)
+        self._set_obstacles([rotated if o is obstacle else o for o in self.obstacles])
+        self._log(f"Obstacle {obstacle.id} image side -> {heading.name}.")
+
+    def _place_obstacle(self, cell: tuple[int, int]) -> None:
+        x_coord, y_coord = cell
+        if x_coord < START_ZONE_CELLS and y_coord < START_ZONE_CELLS:
+            self._log(f"Cell {cell} is inside the start area; keep it clear.")
+            return
+        if len(self.obstacles) >= MAX_OBSTACLES:
+            self._log(f"Already {MAX_OBSTACLES} obstacles; remove one first.")
+            return
+
+        heading = Direction[self.heading_var.get()]
+        # Imported ids need not be 0..n-1, so take the next free one.
+        next_id = max((o.id for o in self.obstacles), default=-1) + 1
+        obstacle = Obstacle(next_id, x_coord, y_coord, heading)
+        self._set_obstacles(self.obstacles + [obstacle])
+        self._log(f"Placed obstacle {obstacle.id} at {cell}, image faces {heading.name}.")
+        self.status_var.set(f"{len(self.obstacles)} obstacles placed.")
+
+    def _set_obstacles(self, obstacles: list[Obstacle]) -> None:
+        """Swap in a new layout: any plan or drive over the old one is void."""
+        self._stop_animation()
+        self.obstacles = obstacles
+        self.image_ids = {
+            obstacle.id: self.image_ids.get(obstacle.id, self.rng.choice(IMAGE_IDS))
+            for obstacle in obstacles
+        }
+        self.plan = None
+        self.leg_index = 0
+        self.pose_index = 0
+        self.robot = self.start_robot
+
+        self._clear_trail()
+        self.canvas.delete("plan")
+        self._draw_obstacles()
+        self._draw_robot()
+        self._update_buttons()
 
     def on_plan(self) -> None:
         self._stop_animation()
@@ -731,7 +1029,7 @@ class SimulatorApp:
 
         leg = self.plan.legs[self.leg_index]
         self.robot = leg.poses[self.pose_index]
-        self._draw_robot()
+        self._draw_robot(leg.turn_centres[self.pose_index])
         self._extend_trail()
         self.pose_index += 1
 
@@ -863,6 +1161,9 @@ class SimulatorApp:
             text="Pause robot" if self.running else "Start robot",
         )
         self.reset_button.configure(state=tk.DISABLED if busy else tk.NORMAL)
+        editable = tk.DISABLED if busy or self.running else tk.NORMAL
+        self.manual_check.configure(state=editable)
+        self.clear_button.configure(state=editable)
 
     def _log(self, message: str) -> None:
         self.log.configure(state=tk.NORMAL)

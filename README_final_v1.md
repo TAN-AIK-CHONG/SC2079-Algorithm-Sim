@@ -38,6 +38,18 @@ that way and plans fine — see that branch if you want the full-geometry versio
 ## Diff summary
 - `src/model.py`: `+ AXLE_TO_FRONT_CM = 21`; `cm_viewing_position` standoff uses
   `AXLE_TO_FRONT_CM` instead of `ROBOT_LENGTH_CM`.
-- Everything else: identical to `f9835a0`.
+- Everything else: identical to `f9835a0`, except the shared tooling and
+  collision check below.
+
+## Shared with `astar_90deg`
+These are kept identical to `astar_90deg` so all branches are tested the same way:
+- `src/testing/gui_simulator.py`, `generate_maps.py`, `visualize_map.py`: copied
+  verbatim. They plan through `plan_mission`, like `rpi/main.py`.
+- `src/collision.py`: copied verbatim. The SAT test skips the car's own axes when
+  it faces along x or y, and the arena wall allows `WALL_TOLERANCE_CM` (3 mm).
+- `src/algorithms/hybrid_astar.py`: each move only checks obstacles within
+  `MOVE_COLLISION_RADIUS_CM` (85 cm) of the car.
+- `src/model.py`: `AXLE_TO_REAR_CM = 0`. The tools need it, and 0 keeps the
+  23 x 19 collision box measured from the pose, unchanged.
 
 Compare: `git diff f9835a0..final_v1`

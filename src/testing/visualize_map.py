@@ -5,11 +5,16 @@ For a single map:
 
 For every map under a directory (recurses into subfolders):
     python visualize_map.py generated_maps --out generated_maps_png
+
+Either way, a visualize_map_logs.txt is written to the output directory with
+one line per map: how long planning took and whether any obstacle was missed,
+then the average planning time over all maps.
 """
 
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -19,7 +24,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Polygon, Rectangle
 
 from algorithms.hamiltonian import exhaustive_search
 from algorithms.graph import Graph
@@ -37,6 +42,8 @@ from planner import Leg, PlanningError, _apply_command, plan_mission
 # plotted path - matches hybrid_astar's own STEP_CM granularity closely
 # enough to look smooth without generating an excessive number of points.
 PATH_SAMPLE_STEP_CM = 2
+
+LOG_FILENAME = "visualize_map_logs.txt"
 
 # Points in the direction the obstacle's image faces, drawn as an arrow off the obstacle cell.
 IMAGE_SIDE_OFFSET = {
@@ -94,9 +101,32 @@ def plan(robot, obstacles):
     return order, final_path, float(length_cm), len(mission.legs), mission.skipped_ids
 
 
-def render(map_path: Path, out_path: Path):
+def render(map_path: Path, out_path: Path, plan_result=None):
+    """Render `map_path` to `out_path`, planning it unless the caller already
+    has a plan() result for it - planning is by far the slow part, so
+    generate_maps.py passes in the one it already computed rather than paying
+    for a second identical plan per map."""
     robot, obstacles = load_map(map_path)
-    order, final_path, length_cm, completed_legs, skipped_ids = plan(robot, obstacles)
+    draw(map_path.stem, robot, obstacles, plan_result or plan(robot, obstacles), out_path)
+
+
+def render_timed(map_path: Path, out_path: Path) -> tuple[float, bool]:
+    """render(), returning (seconds spent planning, every obstacle reached?).
+    Only the plan is timed - drawing the PNG is not part of the benchmark."""
+    robot, obstacles = load_map(map_path)
+    start = time.perf_counter()
+    plan_result = plan(robot, obstacles)
+    elapsed_s = time.perf_counter() - start
+
+    draw(map_path.stem, robot, obstacles, plan_result, out_path)
+    _, final_path, _, _, skipped_ids = plan_result
+    return elapsed_s, bool(final_path) and not skipped_ids
+
+
+def draw(title_stem: str, robot, obstacles, plan_result, out_path: Path):
+    """The plotting half of render(), split out so a caller holding a map in
+    memory (and its plan) can get a PNG without a JSON round-trip."""
+    order, final_path, length_cm, completed_legs, skipped_ids = plan_result
 
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.set_xlim(0, ARENA_LENGTH_CM)
@@ -150,12 +180,24 @@ def render(map_path: Path, out_path: Path):
         ys = [robot.y_cm for robot in final_path]
         ax.plot(xs, ys, color="#1f77b4", linewidth=1.5, zorder=2, label="planned path")
 
-    # Viewing pose markers, in visit order.
+    # Viewing pose markers, in visit order: the robot's footprint there, and a
+    # dot on its rear-axle midpoint - the point the planned path traces.
     node_robots = {node.id: node.viewing_pose for node in Graph.build(robot, obstacles).nodes}
     for visit_index, node_id in enumerate(order):
         node_robot = node_robots[node_id]
         label = "S" if node_id == "S" else node_id
         color = "green" if node_id == "S" else "orange"
+        ax.add_patch(
+            Polygon(
+                node_robot.footprint_corners_cm(),
+                closed=True,
+                fill=False,
+                edgecolor=color,
+                linestyle="--",
+                linewidth=0.8,
+                zorder=5,
+            )
+        )
         ax.plot(
             node_robot.x_cm,
             node_robot.y_cm,
@@ -179,7 +221,7 @@ def render(map_path: Path, out_path: Path):
         else f"skipped {len(skipped_ids)}: " + ", ".join(str(node_id) for node_id in skipped_ids)
     )
     ax.set_title(
-        f"{map_path.stem}  |  {len(obstacles)} obstacles  |  "
+        f"{title_stem}  |  {len(obstacles)} obstacles  |  "
         f"order: {' -> '.join(str(node_id) for node_id in order)}\n"
         f"length={length_cm:.1f}cm  legs={completed_legs}/{len(order) - 1}  {status}",
         fontsize=9,
@@ -209,19 +251,46 @@ def main():
         if not map_paths:
             raise SystemExit(f"no *.json maps found under {args.input}")
         out_root = args.out or args.input
-        for map_path in map_paths:
-            rel = map_path.relative_to(args.input)
-            out_path = (out_root / rel).with_suffix(".png")
-            render(map_path, out_path)
-            print(f"wrote {out_path}")
+        jobs = [
+            (map_path, (out_root / map_path.relative_to(args.input)).with_suffix(".png"))
+            for map_path in map_paths
+        ]
     else:
-        out_path = (
-            args.out / args.input.with_suffix(".png").name
-            if args.out
-            else args.input.with_suffix(".png")
+        out_root = args.out or args.input.parent
+        jobs = [(args.input, out_root / args.input.with_suffix(".png").name)]
+
+    render_and_log(jobs, out_root / LOG_FILENAME)
+
+
+def render_and_log(jobs: list[tuple[Path, Path]], log_path: Path):
+    """Render every (map, png) job, logging each map's planning time and a
+    FAILED flag if it missed any obstacle, then the average time at the end.
+
+    Written a line at a time and flushed, like generate_maps.py's failure
+    log, so a long batch can be watched while it runs and a killed run still
+    leaves the timings it got through."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    total_s = 0.0
+    failures = 0
+
+    with log_path.open("w", encoding="utf-8") as log:
+        for map_path, out_path in jobs:
+            elapsed_s, solved = render_timed(map_path, out_path)
+            total_s += elapsed_s
+            failures += not solved
+
+            line = f"{map_path}  {elapsed_s:.3f}s" + ("" if solved else "  FAILED")
+            log.write(line + "\n")
+            log.flush()
+            print(f"wrote {out_path}  ({line})", flush=True)
+
+        summary = (
+            f"average {total_s / len(jobs):.3f}s over {len(jobs)} runs, "
+            f"{failures} failed"
         )
-        render(args.input, out_path)
-        print(f"wrote {out_path}")
+        log.write(f"\n{summary}\n")
+
+    print(f"\n{summary} -> {log_path}")
 
 
 if __name__ == "__main__":

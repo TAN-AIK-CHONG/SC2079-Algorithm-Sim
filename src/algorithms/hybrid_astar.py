@@ -22,6 +22,9 @@ LOOSE_GOAL_ANGLE_TOLERANCE_RAD = math.radians(10)
 
 TURN_CHANGE_PENALTY_CM = 5
 
+# NOTE: Arbitrarily set. Optimization: Don't compute collision against obstacle if the obstacle is further than this distance from the robot.
+MOVE_COLLISION_RADIUS_CM = 85
+
 
 def _normalize_angle(theta: float) -> float:
     while theta > math.pi:
@@ -75,11 +78,28 @@ def _segment_collision_free(
     obstacles: list[Corners],
     samples: int = SEGMENT_SAMPLES,
 ) -> bool:
+    nearby_obstacles = _obstacles_within_move_reach(Robot(x, y, theta), obstacles)
     for i in range(samples + 1):
         sample = _advance(x, y, theta, primitive, i / samples)
-        if footprint_in_collision(Robot(*sample), obstacles):
+        if footprint_in_collision(Robot(*sample), nearby_obstacles):
             return False
     return True
+
+
+def _obstacles_within_move_reach(robot: Robot, obstacles: list[Corners]) -> list[Corners]:
+    car_centre = _centre(robot.footprint_corners_cm())
+    return [
+        obstacle
+        for obstacle in obstacles
+        if math.dist(car_centre, _centre(obstacle)) <= MOVE_COLLISION_RADIUS_CM
+    ]
+
+
+def _centre(corners: Corners) -> tuple[float, float]:
+    return (
+        sum(x for x, _ in corners) / len(corners),
+        sum(y for _, y in corners) / len(corners),
+    )
 
 
 def hybrid_astar(

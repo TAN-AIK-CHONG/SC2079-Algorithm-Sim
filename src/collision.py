@@ -2,7 +2,15 @@ import math
 
 from model import ARENA_LENGTH_CM, Corners, Point, Robot
 
-WALL_TOLERANCE_CM = 1e-9
+# A turn swings the rear overhang out by up to ~3mm. Without that much slack,
+# a car parked flush against a wall - as it is at the start - could never
+# turn away from it.
+WALL_TOLERANCE_CM = 0.3
+
+WORLD_AXES = ((1.0, 0.0), (0.0, 1.0))
+# cos(pi/2) is ~6e-17, not 0, so a car facing along y still has edges off
+# the axis by float noise.
+AXIS_ALIGNED_TOLERANCE_CM = 1e-9
 
 
 def footprint_in_collision(robot: Robot, obstacles: list[Corners]) -> bool:
@@ -20,12 +28,14 @@ def _inside_arena(corners: Corners) -> bool:
 
 
 def _overlaps(robot_corners: Corners, obstacle_corners: Corners) -> bool:
-    axes = (
-        (1.0, 0.0),
-        (0.0, 1.0),
-        _edge_axis(robot_corners[0], robot_corners[1]),
-        _edge_axis(robot_corners[1], robot_corners[2]),
-    )
+    axes = WORLD_AXES
+    if not _is_axis_aligned(robot_corners):
+        # A car facing along x or y has edges on the world axes already, so
+        # only a rotated car (mid-arc) needs its own edges tested too.
+        axes += (
+            _edge_axis(robot_corners[0], robot_corners[1]),
+            _edge_axis(robot_corners[1], robot_corners[2]),
+        )
 
     for axis in axes:
         robot_min, robot_max = _project(robot_corners, axis)
@@ -33,6 +43,11 @@ def _overlaps(robot_corners: Corners, obstacle_corners: Corners) -> bool:
         if robot_max <= obstacle_min or obstacle_max <= robot_min:
             return False
     return True
+
+
+def _is_axis_aligned(corners: Corners) -> bool:
+    (start_x, start_y), (end_x, end_y) = corners[0], corners[1]
+    return abs(end_x - start_x) < AXIS_ALIGNED_TOLERANCE_CM or abs(end_y - start_y) < AXIS_ALIGNED_TOLERANCE_CM
 
 
 def _edge_axis(start: Point, end: Point) -> Point:

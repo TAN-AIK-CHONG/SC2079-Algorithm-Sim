@@ -11,6 +11,11 @@ ROBOT_WIDTH_CM = 19
 # not the rear bumper: standoff - AXLE_TO_FRONT_CM is where the nose lands. Using
 # ROBOT_LENGTH_CM there put the nose ~2 cm too far from the box.
 AXLE_TO_FRONT_CM = 21
+# Where the planner's pose sits relative to the back of the COLLISION
+# footprint. The 23 x 19 box is still measured from the pose (see
+# README_final_v1.md), so for collision and drawing purposes the pose is
+# the back edge: 0, not the real axle's offset.
+AXLE_TO_REAR_CM = 0
 
 OBSTACLE_FOOTPRINT_LENGTH_CM = 10
 OBSTACLE_MARGIN_CM = 5
@@ -112,11 +117,13 @@ class Robot:
                 self.y_cm + along * forward_y + across * right_y,
             )
 
+        rear = -AXLE_TO_REAR_CM
+        front = ROBOT_LENGTH_CM - AXLE_TO_REAR_CM
         return (
-            corner(0.0, -half),
-            corner(ROBOT_LENGTH_CM, -half),
-            corner(ROBOT_LENGTH_CM, half),
-            corner(0.0, half),
+            corner(rear, -half),
+            corner(front, -half),
+            corner(front, half),
+            corner(rear, half),
         )
 
 
