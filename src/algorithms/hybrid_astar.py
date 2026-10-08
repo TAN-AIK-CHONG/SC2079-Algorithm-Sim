@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from algorithms.dubins import dubins_length
 from collision import footprint_in_collision
-from model import Corners, Obstacle, Robot, MotionPrimitive
+from model import MAX_HEADING_ERROR_RAD, Corners, Obstacle, Robot, MotionPrimitive
 
 STEP_CM = 10
 SEGMENT_SAMPLES = 3
@@ -18,12 +18,12 @@ RIGHT_TURNING_RADIUS_CM = 35
 # The real car drifts more on arcs and on every change of manoeuvre than on
 # straights, so these steer the search towards long straight runs with few,
 # deliberate turns.
-TURN_COST_MULTIPLIER = 6.0
-STEERING_CHANGE_PENALTY_CM = 15
-DIRECTION_SWITCH_PENALTY_CM = 25
+TURN_COST_MULTIPLIER = 8.0
+STEERING_CHANGE_PENALTY_CM = 25
+DIRECTION_SWITCH_PENALTY_CM = 35
 
 # NOTE: Arbitrarily set. Optimization: Don't compute collision against obstacle if the obstacle is further than this distance from the robot.
-MOVE_COLLISION_RADIUS_CM = 85
+MOVE_COLLISION_RADIUS_CM = 55
 
 
 def _normalize_angle(theta: float) -> float:
@@ -169,7 +169,7 @@ def viewing_arrivals(
         )
 
     def heuristic(x, y, theta):
-        return dubins_length(Robot(x, y, theta), heuristic_goal)
+        return 2.5 * dubins_length(Robot(x, y, theta), heuristic_goal)
 
     start_state = (start.x_cm, start.y_cm, start.theta_rad)
     start_key = state_key(*start_state, None)
