@@ -23,7 +23,7 @@ OBSTACLE_FOOTPRINT_CELLS = OBSTACLE_FOOTPRINT_LENGTH_CM // GRID_LENGTH_CM
 # ideal cm_viewing_position, so the robot never shuffles on the spot to
 # square up exactly. The camera sits on the nose.
 MIN_CAMERA_DISTANCE_CM = 20
-MAX_CAMERA_DISTANCE_CM = 40
+MAX_CAMERA_DISTANCE_CM = 50
 # Images stay recognisable when viewed a bit obliquely.
 MAX_VIEWING_ANGLE_RAD = math.radians(10)
 # Keeps the image inside the camera frame.
